@@ -1,0 +1,4 @@
+.project
+.pydevproject
+.demo-models
+*.pyc
