@@ -72,4 +72,55 @@ def get_mesh(model_json, type):
         img.data
     
     return mesh
+
+def load_mesh(mesh_data, subfiles):
+    """Given a downloaded mesh, return a collada instance"""
     
+    def inline_loader(filename):
+        return subfiles[posixpath.basename(filename)]
+    
+    mesh = collada.Collada(StringIO(mesh_data), aux_file_loader=inline_loader)
+    
+    #this will force loading of the textures too
+    for img in mesh.images:
+        img.data
+    
+    return mesh
+
+def download_mesh(model_json, type):
+    """Given a model JSON dictionary and a type to load, downloads and returns the main
+    file data and a dictionary mapping its dependencies to their download data"""
+    
+    types = model_json['metadata']['types']
+    if not type in types:
+        return None
+    
+    type_dict = types[type]
+    mesh_hash = type_dict['hash']
+    
+    print 'Downloading mesh', model_json['base_path'], mesh_hash
+    
+    def inline_loader(filename):
+        texture_path = posixpath.normpath(posixpath.join(model_json['base_path'], type, model_json['version_num'], filename))
+        texture_url = DNS_URL + texture_path
+        texture_json = json.loads(urlfetch(texture_url))
+        texture_hash = texture_json['Hash']
+        texture_data = urlfetch(DOWNLOAD_URL + '/' + texture_hash)
+        return texture_data
+    
+    data = urlfetch(DOWNLOAD_URL + '/' + mesh_hash)
+    subfile_dict = {}
+    
+    for subfile in type_dict['subfiles']:
+        splitpath = subfile.split('/')
+        basename = splitpath[-2]
+        
+        texture_path = posixpath.normpath(posixpath.join(model_json['base_path'], type, model_json['version_num'], basename))
+        texture_url = DNS_URL + texture_path
+        texture_json = json.loads(urlfetch(texture_url))
+        texture_hash = texture_json['Hash']
+        texture_data = urlfetch(DOWNLOAD_URL + '/' + texture_hash)
+
+        subfile_dict[basename] = texture_data
+    
+    return (data, subfile_dict)

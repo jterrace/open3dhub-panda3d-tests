@@ -4,6 +4,7 @@ import time
 import threading
 import Queue
 from multiprocessing.pool import Pool
+import multiprocessing
 import random
 import tempfile
 import shutil
@@ -43,6 +44,8 @@ FORCE_DOWNLOAD = None
 MODEL_TYPE = None
 NUM_MODELS = None
 SEED = None
+NUM_DOWNLOAD_PROCS = 2
+NUM_LOAD_PROCS = multiprocessing.cpu_count()
 
 MAX_SOLID_ANGLE = 4.0 * math.pi
 def solid_angle(cameraLoc, objLoc, objRadius):
@@ -67,6 +70,8 @@ class Model(object):
         self.scale = scale
         self.bam_file = None
         self.solid_angle = 0.0
+        self.data = None
+        self.subfiles = None
     
     def __str__(self):
         return "<Model '%s' at (%.7g,%.7g,%.7g) scale %.7g>" % (self.model_json['base_path'], self.x, self.y, self.z, self.scale)
@@ -74,7 +79,10 @@ class Model(object):
         return str(self)
         
 def load_model(model):
-    mesh = open3dhub.get_mesh(model.model_json, MODEL_TYPE)
+    
+    mesh = open3dhub.load_mesh(model.data, model.subfiles)
+    mesh.data = None
+    mesh.subfiles = None
     print 'got mesh', mesh
     scene_members = pandacore.getSceneMembers(mesh)
     print 'got', len(scene_members), 'members'
@@ -119,6 +127,22 @@ def load_model(model):
     
     return model
 
+def download_model(model):
+    (data, subfile_dict) = open3dhub.download_mesh(model.model_json, MODEL_TYPE)
+    model.data = data
+    model.subfiles = subfile_dict
+    return model
+
+def check_waiting(waiting):
+    finished = []
+    new_waiting = []
+    for res in waiting:
+        if res.ready():
+            finished.append(res)
+        else:
+            new_waiting.append(res)
+    return finished, new_waiting
+
 class LoadingThread(threading.Thread):
     def _run(self):
         demo_models = scene.get_demo_models(force=FORCE_DOWNLOAD)
@@ -131,7 +155,7 @@ class LoadingThread(threading.Thread):
             chosen_index = to_choose.pop(rand_index)
             chosen.append(chosen_index)
         
-        models = []    
+        to_download = []    
         for model_index in chosen:
             model = Model(demo_models[model_index],
                                 random.uniform(-10000, 10000),
@@ -139,29 +163,36 @@ class LoadingThread(threading.Thread):
                                 0,
                                 random.uniform(0.5, 6.0))
             model.solid_angle = solid_angle(Vec3(0, 30000, 10000), Vec3(model.x, model.y, model.z), model.scale * 1000)
-            models.append((-1 * model.solid_angle, model))
+            to_download.append((-1 * model.solid_angle, model))
             
-        heapq.heapify(models)
+        heapq.heapify(to_download)
         
-        pool = Pool(2)
-        waiting_for = []
-        while len(models) > 0 or len(waiting_for) > 0:
-            finished = []
-            new_waiting = []
-            for res in waiting_for:
-                if res.ready():
-                    finished.append(res)
-                else:
-                    new_waiting.append(res)
-            waiting_for = new_waiting
+        downloading_pool = Pool(NUM_DOWNLOAD_PROCS)
+        loading_pool = Pool(NUM_LOAD_PROCS)
+        downloading = []
+        to_load = []
+        loading = []
+        
+        while len(to_download) > 0 or len(downloading) > 0 or len(loading) > 0:
+            finished_downloading, downloading = check_waiting(downloading)
+            finished_loading, loading = check_waiting(loading)
             
-            for res in finished:
+            while len(downloading) < NUM_DOWNLOAD_PROCS and len(to_download) > 0:
+                priority, model = heapq.heappop(to_download)
+                downloading.append(downloading_pool.apply_async(download_model, (model,)))
+            
+            for res in finished_downloading:
+                print 'finished a download', len(to_download) + len(downloading), 'left'
+                model = res.get()
+                heapq.heappush(to_load, (-1 * model.solid_angle, model))
+            
+            while len(loading) < NUM_LOAD_PROCS and len(to_load) > 0:
+                priority, model = heapq.heappop(to_load)
+                loading.append(loading_pool.apply_async(load_model, (model,)))
+            
+            for res in finished_loading:
+                print 'finished loading a model', len(to_load) + len(loading), 'left'
                 load_queue.put(res.get())
-                print len(waiting_for) + len(models), 'models left to load.'
-            
-            while len(waiting_for) < 2 and len(models) > 0:
-                priority, model = heapq.heappop(models)
-                waiting_for.append(pool.apply_async(load_model, (model,)))
                 
             time.sleep(0.05)
             
