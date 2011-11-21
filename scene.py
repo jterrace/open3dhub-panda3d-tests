@@ -52,6 +52,18 @@ def filter_no_textures(models):
     
     return filtered
 
+def filter_too_complicated(models):
+    """Filters out models that have too many draw calls"""
+    
+    filtered = []
+    
+    for m in models:
+        optimized = m['metadata']['types']['optimized']
+        if 'metadata' in optimized and optimized['metadata']['num_draw_calls'] < 50:
+            filtered.append(m)
+    
+    return filtered
+
 def filter_for_demo(models):
     """Filters out models that we don't want to use for the demo"""
     
@@ -59,6 +71,7 @@ def filter_for_demo(models):
     models = filter_zero_progressive(models)
     models = filter_large_triangles(models)
     models = filter_no_textures(models)
+    models = filter_too_complicated(models)
     
     return models
 
