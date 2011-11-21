@@ -12,7 +12,7 @@ import math
 import heapq
 
 from direct.showbase.ShowBase import ShowBase
-from panda3d.core import TransparencyAttrib, RigidBodyCombiner
+from panda3d.core import TransparencyAttrib, RigidBodyCombiner, AntialiasAttrib
 from panda3d.core import StringStream, NodePath, GeomNode
 from panda3d.core import Mat4, VBase4, Vec3
 from pandac import PandaModules as pm
@@ -281,6 +281,8 @@ def main():
     environ.setScale(30000 / xRange, 30000 / yRange, 1)
     environ.setPos(0, 0, -1 * zRange / 2.0)
     #environ.setPos(0, 0, -100)
+    
+    render.setAntialias(AntialiasAttrib.MAuto)
     
     base.run()
 

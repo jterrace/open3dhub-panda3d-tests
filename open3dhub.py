@@ -12,12 +12,15 @@ BROWSE_URL = BASE_URL + '/api/browse'
 DOWNLOAD_URL = BASE_URL + '/download'
 DNS_URL = BASE_URL + '/dns'
 
-def urlfetch(url):
+def urlfetch(url, range=None):
     """Fetches the given URL and returns data from it.
     Will take care of gzip if enabled on server."""
     
     request = urllib2.Request(url)
     request.add_header('Accept-encoding', 'gzip')
+    if range is not None:
+        offset, length = range
+        request.add_header('Range', 'bytes=%d-%d' % (offset, offset+length-1))
     response = urllib2.urlopen(request)
     if response.info().get('Content-Encoding') == 'gzip':
         buf = StringIO(response.read())
@@ -43,36 +46,6 @@ def get_list(limit=20):
         
     return all_items
 
-def get_mesh(model_json, type):
-    """Given a model JSON dictionary and a type to load, returns a pycollada instance"""
-    
-    types = model_json['metadata']['types']
-    if not type in types:
-        return None
-    
-    type_dict = types[type]
-    mesh_hash = type_dict['hash']
-    
-    print 'Downloading mesh', model_json['base_path'], mesh_hash
-    
-    def inline_loader(filename):
-        texture_path = posixpath.normpath(posixpath.join(model_json['base_path'], type, model_json['version_num'], filename))
-        texture_url = DNS_URL + texture_path
-        texture_json = json.loads(urlfetch(texture_url))
-        texture_hash = texture_json['Hash']
-        texture_data = urlfetch(DOWNLOAD_URL + '/' + texture_hash)
-        return texture_data
-    
-    data = urlfetch(DOWNLOAD_URL + '/' + mesh_hash)
-    
-    mesh = collada.Collada(StringIO(urlfetch(DOWNLOAD_URL + '/' + mesh_hash)), aux_file_loader=inline_loader)
-    
-    #this will force loading of the textures too
-    for img in mesh.images:
-        img.data
-    
-    return mesh
-
 def load_mesh(mesh_data, subfiles):
     """Given a downloaded mesh, return a collada instance"""
     
@@ -96,17 +69,14 @@ def download_mesh(model_json, type):
         return None
     
     type_dict = types[type]
+    
+    mipmaps = type_dict.get('mipmaps')
+    if mipmaps:
+        mipmaps = dict((posixpath.basename(p), info) for p, info in mipmaps.iteritems())
+    
     mesh_hash = type_dict['hash']
     
     print 'Downloading mesh', model_json['base_path'], mesh_hash
-    
-    def inline_loader(filename):
-        texture_path = posixpath.normpath(posixpath.join(model_json['base_path'], type, model_json['version_num'], filename))
-        texture_url = DNS_URL + texture_path
-        texture_json = json.loads(urlfetch(texture_url))
-        texture_hash = texture_json['Hash']
-        texture_data = urlfetch(DOWNLOAD_URL + '/' + texture_hash)
-        return texture_data
     
     data = urlfetch(DOWNLOAD_URL + '/' + mesh_hash)
     subfile_dict = {}
@@ -115,12 +85,27 @@ def download_mesh(model_json, type):
         splitpath = subfile.split('/')
         basename = splitpath[-2]
         
-        texture_path = posixpath.normpath(posixpath.join(model_json['base_path'], type, model_json['version_num'], basename))
-        texture_url = DNS_URL + texture_path
-        texture_json = json.loads(urlfetch(texture_url))
-        texture_hash = texture_json['Hash']
-        texture_data = urlfetch(DOWNLOAD_URL + '/' + texture_hash)
+        if mipmaps is not None and basename in mipmaps:
+            mipmap_levels = mipmaps[basename]['byte_ranges']
+            tar_hash = mipmaps[basename]['hash']
+            offset = 0
+            length = 0
+            for mipmap in mipmap_levels:
+                offset = mipmap['offset']
+                length = mipmap['length']
+                if mipmap['width'] >= 128 or mipmap['height'] >= 128:
+                    break
 
-        subfile_dict[basename] = texture_data
+            texture_data = urlfetch(DOWNLOAD_URL + '/' + tar_hash, range=(offset, length))
+            subfile_dict[basename] = texture_data
+        
+        else:
+            texture_path = posixpath.normpath(posixpath.join(model_json['base_path'], type, model_json['version_num'], basename))
+            texture_url = DNS_URL + texture_path
+            texture_json = json.loads(urlfetch(texture_url))
+            texture_hash = texture_json['Hash']
+            texture_data = urlfetch(DOWNLOAD_URL + '/' + texture_hash)
+    
+            subfile_dict[basename] = texture_data
     
     return (data, subfile_dict)
