@@ -6,25 +6,20 @@ import Queue
 from multiprocessing.pool import Pool
 import multiprocessing
 import random
-import tempfile
 import shutil
 import math
-import heapq
 
 from direct.showbase.ShowBase import ShowBase
 from panda3d.core import TransparencyAttrib, RigidBodyCombiner, AntialiasAttrib
-from panda3d.core import StringStream, NodePath, GeomNode
-from panda3d.core import Mat4, VBase4, Vec3
-from pandac import PandaModules as pm
+from panda3d.core import VBase4, Vec3
 
 import argparse
-import numpy
 import collada
 from meshtool.filters.panda_filters import pandacore
 from meshtool.filters.panda_filters.pandacontrols import KeyboardMovement, MouseDrag, MouseScaleZoom, MouseCamera
 
-import open3dhub
 import scene
+import load_scheduler
 
 class MyBase(ShowBase):
     def userExit(self):
@@ -61,93 +56,12 @@ def solid_angle(cameraLoc, objLoc, objRadius):
     cos_alpha = math.sqrt(1.0 - sin_alpha * sin_alpha)
     return 2.0 * math.pi * (1.0 - cos_alpha)
 
-class Model(object):
-    def __init__(self, model_json, x, y, z, scale):
-        self.model_json = model_json
-        self.x = x
-        self.y = y
-        self.z = z
-        self.scale = scale
-        self.bam_file = None
-        self.solid_angle = 0.0
-        self.data = None
-        self.subfiles = None
-    
-    def __str__(self):
-        return "<Model '%s' at (%.7g,%.7g,%.7g) scale %.7g>" % (self.model_json['base_path'], self.x, self.y, self.z, self.scale)
-    def __repr__(self):
-        return str(self)
-        
-def load_model(model):
-    
-    mesh = open3dhub.load_mesh(model.data, model.subfiles)
-    mesh.data = None
-    mesh.subfiles = None
-    print 'got mesh', mesh
-    scene_members = pandacore.getSceneMembers(mesh)
-    print 'got', len(scene_members), 'members'
-    
-    rotateNode = GeomNode("rotater")
-    rotatePath = NodePath(rotateNode)
-    matrix = numpy.identity(4)
-    if mesh.assetInfo.upaxis == collada.asset.UP_AXIS.X_UP:
-        r = collada.scene.RotateTransform(0,1,0,90)
-        matrix = r.matrix
-    elif mesh.assetInfo.upaxis == collada.asset.UP_AXIS.Y_UP:
-        r = collada.scene.RotateTransform(1,0,0,90)
-        matrix = r.matrix
-    rotatePath.setMat(Mat4(*matrix.T.flatten().tolist()))
-    
-    #rbc = RigidBodyCombiner('combiner')
-    #rbcPath = rotatePath.attachNewNode(rbc)
-    
-    for geom, renderstate, mat4 in scene_members:
-        node = GeomNode("primitive")
-        node.addGeom(geom)
-        if renderstate is not None:
-            node.setGeomState(0, renderstate)
-        geomPath = rotatePath.attachNewNode(node)
-        geomPath.setMat(mat4)
-        
-    #rbc.collect()
-    rotatePath.flattenStrong()
-    
-    wrappedNode = pandacore.centerAndScale(rotatePath)
-    wrappedNode.setPos(model.x, model.y, model.z)
-    wrappedNode.setScale(model.scale, model.scale, model.scale)
-    minPt, maxPt = wrappedNode.getTightBounds()
-    zRange = math.fabs(minPt.getZ() - maxPt.getZ())
-    wrappedNode.setPos(model.x, model.y, zRange / 2.0)
-    
-    bam_temp = tempfile.mktemp('.bam', dir=TEMPDIR)
-    wrappedNode.writeBamFile(bam_temp)
-    model.bam_file = bam_temp
-    
-    print 'returning bam file', bam_temp
-    
-    return model
-
-def download_model(model):
-    (data, subfile_dict) = open3dhub.download_mesh(model.model_json, MODEL_TYPE)
-    model.data = data
-    model.subfiles = subfile_dict
-    return model
-
-def check_waiting(waiting):
-    finished = []
-    new_waiting = []
-    for res in waiting:
-        if res.ready():
-            finished.append(res)
-        else:
-            new_waiting.append(res)
-    return finished, new_waiting
-
 class LoadingThread(threading.Thread):
     def _run(self):
+        
         demo_models = scene.get_demo_models(force=FORCE_DOWNLOAD)
         print 'Loaded', len(demo_models), 'models'
-
+        
         to_choose = range(len(demo_models))
         chosen = []
         while len(chosen) < NUM_MODELS:
@@ -155,44 +69,40 @@ class LoadingThread(threading.Thread):
             chosen_index = to_choose.pop(rand_index)
             chosen.append(chosen_index)
         
-        to_download = []    
+        download_pool = load_scheduler.TaskPool(NUM_DOWNLOAD_PROCS)
+        loader_pool = load_scheduler.TaskPool(NUM_LOAD_PROCS)
+  
         for model_index in chosen:
-            model = Model(demo_models[model_index],
-                                random.uniform(-10000, 10000),
-                                random.uniform(-10000, 10000),
-                                0,
-                                random.uniform(0.5, 6.0))
+            model = load_scheduler.Model(model_json = demo_models[model_index],
+                                model_type = MODEL_TYPE,
+                                x = random.uniform(-10000, 10000),
+                                y = random.uniform(-10000, 10000),
+                                z = 0,
+                                scale = random.uniform(0.5, 6.0))
             model.solid_angle = solid_angle(Vec3(0, 30000, 10000), Vec3(model.x, model.y, model.z), model.scale * 1000)
-            to_download.append((-1 * model.solid_angle, model))
             
-        heapq.heapify(to_download)
+            dt = load_scheduler.DownloadTask(model, priority=model.solid_angle)
+            download_pool.add_task(dt)
         
-        downloading_pool = Pool(NUM_DOWNLOAD_PROCS)
-        loading_pool = Pool(NUM_LOAD_PROCS)
-        downloading = []
-        to_load = []
-        loading = []
-        
-        while len(to_download) > 0 or len(downloading) > 0 or len(loading) > 0:
-            finished_downloading, downloading = check_waiting(downloading)
-            finished_loading, loading = check_waiting(loading)
+        while not(download_pool.empty() and loader_pool.empty()):
+            finished_tasks = download_pool.poll() + loader_pool.poll()
             
-            while len(downloading) < NUM_DOWNLOAD_PROCS and len(to_download) > 0:
-                priority, model = heapq.heappop(to_download)
-                downloading.append(downloading_pool.apply_async(download_model, (model,)))
-            
-            for res in finished_downloading:
-                print 'finished a download', len(to_download) + len(downloading), 'left'
-                model = res.get()
-                heapq.heappush(to_load, (-1 * model.solid_angle, model))
-            
-            while len(loading) < NUM_LOAD_PROCS and len(to_load) > 0:
-                priority, model = heapq.heappop(to_load)
-                loading.append(loading_pool.apply_async(load_model, (model,)))
-            
-            for res in finished_loading:
-                print 'finished loading a model', len(to_load) + len(loading), 'left'
-                load_queue.put(res.get())
+            for finished_task in finished_tasks:
+                print 'finished task', type(finished_task), 'has', len(finished_task.dependents), 'dependents'
+                
+                for dependent in finished_task.dependents:
+                    if isinstance(dependent, load_scheduler.DownloadTask):
+                        print 'adding a dependent download task'
+                        download_pool.add_task(dependent)
+                    elif isinstance(dependent, load_scheduler.LoadTask):
+                        print 'adding a dependent load task'
+                        loader_pool.add_task(dependent)
+                    else:
+                        print 'Unknown dependent type', type(dependent)
+                    
+                if isinstance(finished_task, load_scheduler.LoadTask):
+                    print 'posting finished load task'
+                    load_queue.put(finished_task.model)
                 
             time.sleep(0.05)
             
@@ -283,7 +193,6 @@ def main():
     zRange = math.fabs(minPt.getZ() - maxPt.getZ())
     environ.setScale(30000 / xRange, 30000 / yRange, 1)
     environ.setPos(0, 0, -1 * zRange / 2.0)
-    #environ.setPos(0, 0, -100)
     
     render.setAntialias(AntialiasAttrib.MAuto)
     

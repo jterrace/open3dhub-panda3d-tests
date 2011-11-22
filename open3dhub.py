@@ -1,25 +1,35 @@
-try: import json
-except ImportError: import simplejson as json
+import json
 import urllib2
 import posixpath
 from StringIO import StringIO
 import gzip
+import tempfile
+import math
+import os
 
+import numpy
 import collada
+from meshtool.filters.panda_filters import pandacore
+from panda3d.core import GeomNode, NodePath, Mat4
+
+import load_scheduler
 
 BASE_URL = 'http://open3dhub.com'
 BROWSE_URL = BASE_URL + '/api/browse'
 DOWNLOAD_URL = BASE_URL + '/download'
 DNS_URL = BASE_URL + '/dns'
 
-def urlfetch(url, range=None):
+CURDIR = os.path.dirname(__file__)
+TEMPDIR = os.path.join(CURDIR, '.temp_models')
+
+def urlfetch(url, httprange=None):
     """Fetches the given URL and returns data from it.
     Will take care of gzip if enabled on server."""
     
     request = urllib2.Request(url)
     request.add_header('Accept-encoding', 'gzip')
-    if range is not None:
-        offset, length = range
+    if httprange is not None:
+        offset, length = httprange
         request.add_header('Range', 'bytes=%d-%d' % (offset, offset+length-1))
     response = urllib2.urlopen(request)
     if response.info().get('Content-Encoding') == 'gzip':
@@ -60,15 +70,15 @@ def load_mesh(mesh_data, subfiles):
     
     return mesh
 
-def download_mesh(model_json, type):
-    """Given a model JSON dictionary and a type to load, downloads and returns the main
-    file data and a dictionary mapping its dependencies to their download data"""
+def download_mesh_and_subtasks(model):
+    """Given a model JSON dictionary and a type to load, downloads the mesh
+    and returns a set of subtasks."""
     
-    types = model_json['metadata']['types']
-    if not type in types:
+    types = model.model_json['metadata']['types']
+    if not model.model_type in types:
         return None
     
-    type_dict = types[type]
+    type_dict = types[model.model_type]
     
     mipmaps = type_dict.get('mipmaps')
     if mipmaps:
@@ -76,7 +86,7 @@ def download_mesh(model_json, type):
     
     mesh_hash = type_dict['hash']
     
-    print 'Downloading mesh', model_json['base_path'], mesh_hash
+    print 'Downloading mesh', model.model_json['base_path'], mesh_hash
     
     data = urlfetch(DOWNLOAD_URL + '/' + mesh_hash)
     subfile_dict = {}
@@ -96,11 +106,11 @@ def download_mesh(model_json, type):
                 if mipmap['width'] >= 128 or mipmap['height'] >= 128:
                     break
 
-            texture_data = urlfetch(DOWNLOAD_URL + '/' + tar_hash, range=(offset, length))
+            texture_data = urlfetch(DOWNLOAD_URL + '/' + tar_hash, httprange=(offset, length))
             subfile_dict[basename] = texture_data
         
         else:
-            texture_path = posixpath.normpath(posixpath.join(model_json['base_path'], type, model_json['version_num'], basename))
+            texture_path = posixpath.normpath(posixpath.join(model.model_json['base_path'], model.model_type, model.model_json['version_num'], basename))
             texture_url = DNS_URL + texture_path
             texture_json = json.loads(urlfetch(texture_url))
             texture_hash = texture_json['Hash']
@@ -108,4 +118,47 @@ def download_mesh(model_json, type):
     
             subfile_dict[basename] = texture_data
     
-    return (data, subfile_dict)
+    load_task = load_scheduler.LoadTask(data, subfile_dict, model, priority=0)
+    return [load_task]
+
+def load_into_bamfile(meshdata, subfiles, model):
+    """Uses pycollada and panda3d to load meshdata and subfiles and
+    write out to a bam file on disk"""
+    
+    mesh = load_mesh(meshdata, subfiles)
+
+    print 'got mesh', mesh
+    scene_members = pandacore.getSceneMembers(mesh)
+    
+    rotateNode = GeomNode("rotater")
+    rotatePath = NodePath(rotateNode)
+    matrix = numpy.identity(4)
+    if mesh.assetInfo.upaxis == collada.asset.UP_AXIS.X_UP:
+        r = collada.scene.RotateTransform(0,1,0,90)
+        matrix = r.matrix
+    elif mesh.assetInfo.upaxis == collada.asset.UP_AXIS.Y_UP:
+        r = collada.scene.RotateTransform(1,0,0,90)
+        matrix = r.matrix
+    rotatePath.setMat(Mat4(*matrix.T.flatten().tolist()))
+    
+    for geom, renderstate, mat4 in scene_members:
+        node = GeomNode("primitive")
+        node.addGeom(geom)
+        if renderstate is not None:
+            node.setGeomState(0, renderstate)
+        geomPath = rotatePath.attachNewNode(node)
+        geomPath.setMat(mat4)
+
+    rotatePath.flattenStrong()
+    
+    wrappedNode = pandacore.centerAndScale(rotatePath)
+    wrappedNode.setPos(model.x, model.y, model.z)
+    wrappedNode.setScale(model.scale, model.scale, model.scale)
+    minPt, maxPt = wrappedNode.getTightBounds()
+    zRange = math.fabs(minPt.getZ() - maxPt.getZ())
+    wrappedNode.setPos(model.x, model.y, zRange / 2.0)
+    
+    bam_temp = tempfile.mktemp('.bam', dir=TEMPDIR)
+    wrappedNode.writeBamFile(bam_temp)
+    
+    return bam_temp
