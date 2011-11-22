@@ -10,8 +10,9 @@ import shutil
 import math
 
 from direct.showbase.ShowBase import ShowBase
-from panda3d.core import TransparencyAttrib, RigidBodyCombiner, AntialiasAttrib
+from panda3d.core import TransparencyAttrib, AntialiasAttrib, TextureAttrib, TextureStage
 from panda3d.core import VBase4, Vec3
+from panda3d.core import PNMImage, Texture, StringStream, GeomNode
 
 import argparse
 import collada
@@ -81,7 +82,7 @@ class LoadingThread(threading.Thread):
                                 scale = random.uniform(0.5, 6.0))
             model.solid_angle = solid_angle(Vec3(0, 30000, 10000), Vec3(model.x, model.y, model.z), model.scale * 1000)
             
-            dt = load_scheduler.DownloadTask(model, priority=model.solid_angle)
+            dt = load_scheduler.ModelDownloadTask(model, priority=model.solid_angle)
             download_pool.add_task(dt)
         
         while not(download_pool.empty() and loader_pool.empty()):
@@ -102,7 +103,11 @@ class LoadingThread(threading.Thread):
                     
                 if isinstance(finished_task, load_scheduler.LoadTask):
                     print 'posting finished load task'
-                    load_queue.put(finished_task.model)
+                    load_queue.put((ActionType.LOAD_MODEL, finished_task.model))
+                elif isinstance(finished_task, load_scheduler.TextureDownloadTask):
+                    load_queue.put((ActionType.UPDATE_TEXTURE, finished_task.model, finished_task.offset, finished_task.data))
+                else:
+                    print 'not doing anything for type', type(finished_task)
                 
             time.sleep(0.05)
             
@@ -118,16 +123,39 @@ def modelLoaded(np):
     print 'Model loaded'
     np.reparentTo(render)
 
+class ActionType(object):
+    LOAD_MODEL = 0
+    UPDATE_TEXTURE = 1
+
 def checkForLoad(task):
     try:
-        model = load_queue.get_nowait()
+        action = load_queue.get_nowait()
     except Queue.Empty:
-        model = None
+        action = None
     
-    if model is None:
+    if action is None:
         return task.cont
 
-    loader.loadModel(model.bam_file, callback=modelLoaded)
+    action_type = action[0]
+    
+    if action_type == ActionType.LOAD_MODEL:
+        model = action[1]
+        loader.loadModel(model.bam_file, callback=modelLoaded)
+    elif action_type == ActionType.UPDATE_TEXTURE:
+        model = action[1]
+        offset = action[2]
+        data = action[3]
+        print model.model_json['base_path'], 'needs texture updating offset', offset
+        texpnm = PNMImage()
+        texpnm.read(StringStream(data), 'something.jpg')
+        newtex = Texture()
+        newtex.load(texpnm)
+        
+        path_search = '**/' + model.model_json['base_path'].replace('/', '_') + '*'
+        np = render.find(path_search)
+        
+        np.setTextureOff(1)
+        np.setTexture(newtex, 1)
     
     return task.cont
 

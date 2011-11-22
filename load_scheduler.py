@@ -48,10 +48,22 @@ class Task(object):
         return -1 
 
 class DownloadTask(Task):
-    """Task for downloading a list of hashes from CDN"""
+    """Base task class for downloading something"""
+    
+    def __init__(self, *args, **kwargs):
+        super(DownloadTask, self).__init__(*args, **kwargs)
+        
+    def run(self, pool):
+        return NotImplementedError
+    
+    def finished(self, result):
+        return NotImplementedError
+
+class ModelDownloadTask(DownloadTask):
+    """Task for downloading a model from CDN"""
     
     def __init__(self, model, *args, **kwargs):
-        super(DownloadTask, self).__init__(*args, **kwargs)
+        super(ModelDownloadTask, self).__init__(*args, **kwargs)
         self.model = model
     
     def run(self, pool):
@@ -60,12 +72,32 @@ class DownloadTask(Task):
     def finished(self, result):
         print 'finished download task'
         for subtask in result:
-            subtask.priority = self.priority
             self.dependents.append(subtask)
 
 def execute_download(model):
-    """Execute function for a DownloadTask"""
+    """Execute function for a ModelDownloadTask"""
     return open3dhub.download_mesh_and_subtasks(model)
+
+class TextureDownloadTask(DownloadTask):
+    """Task for downloading a texture from CDN"""
+    
+    def __init__(self, model, offset, *args, **kwargs):
+        super(TextureDownloadTask, self).__init__(*args, **kwargs)
+        self.model = model
+        self.offset = offset
+        self.data = None
+    
+    def run(self, pool):
+        return pool.apply_async(execute_texture_download, (self.model, self.offset))
+    
+    def finished(self, result):
+        print 'finished texture download task'
+        self.data = result
+
+def execute_texture_download(model, offset):
+    """Execute function for a TextureDownloadTask"""
+    return open3dhub.download_texture(model, offset)
+    
 
 class LoadTask(Task):
     """Task for loading a model using pycollada and turning it into 
