@@ -251,7 +251,10 @@ def main():
     taskMgr = base.taskMgr
     loader = base.loader
     
-    shutil.rmtree(TEMPDIR)
+    try:
+        shutil.rmtree(TEMPDIR)
+    except OSError:
+        pass
     os.mkdir(TEMPDIR)
     
     base.disableMouse()
