@@ -40,8 +40,8 @@ FORCE_DOWNLOAD = None
 MODEL_TYPE = None
 NUM_MODELS = None
 SEED = None
-NUM_DOWNLOAD_PROCS = 2
-NUM_LOAD_PROCS = multiprocessing.cpu_count()
+NUM_DOWNLOAD_PROCS = 1
+NUM_LOAD_PROCS = 1#multiprocessing.cpu_count()
 
 MAX_SOLID_ANGLE = 4.0 * math.pi
 def solid_angle(cameraLoc, objLoc, objRadius):
@@ -106,6 +106,8 @@ class LoadingThread(threading.Thread):
                     load_queue.put((ActionType.LOAD_MODEL, finished_task.model))
                 elif isinstance(finished_task, load_scheduler.TextureDownloadTask):
                     load_queue.put((ActionType.UPDATE_TEXTURE, finished_task.model, finished_task.offset, finished_task.data))
+                elif isinstance(finished_task, load_scheduler.ProgressiveDownloadTask):
+                    print '===========SHOULD DO SOMETHING WITH PROGRESSIVE TAKS-=------======'
                 else:
                     print 'not doing anything for type', type(finished_task)
                 

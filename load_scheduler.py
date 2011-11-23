@@ -2,6 +2,7 @@ import open3dhub
 import multiprocessing
 import heapq
 import time
+import math
 from collections import namedtuple
 
 class Model(object):
@@ -98,6 +99,44 @@ def execute_texture_download(model, offset):
     """Execute function for a TextureDownloadTask"""
     return open3dhub.download_texture(model, offset)
     
+class ProgressiveDownloadTask(DownloadTask):
+    """Task for downloading progressive stream"""
+    
+    def __init__(self, model, offset, length, refinements_read, num_refinements, previous_data, *args, **kwargs):
+        super(ProgressiveDownloadTask, self).__init__(*args, **kwargs)
+        self.model = model
+        self.offset = offset
+        self.length = length
+        self.refinements_read = refinements_read
+        self.num_refinements = num_refinements
+        self.previous_data = previous_data
+    
+    def run(self, pool):
+        return pool.apply_async(execute_progressive_download, (self.model, self.offset, self.length, self.refinements_read, self.num_refinements, self.previous_data))
+    
+    def finished(self, result):
+        print 'finished progressive download task'
+        refinements_read, num_refinements, refinements, previous_data = result
+        
+        self.refinements = refinements
+        
+        next_priority = self.model.solid_angle * \
+                (math.sqrt(open3dhub.PROGRESSIVE_CHUNK_SIZE) /
+                 math.sqrt(self.offset + self.length + open3dhub.PROGRESSIVE_CHUNK_SIZE))
+        
+        if refinements_read < num_refinements:
+            next_progressive_task = ProgressiveDownloadTask(self.model,
+                                                            self.offset + self.length,
+                                                            open3dhub.PROGRESSIVE_CHUNK_SIZE,
+                                                            refinements_read = refinements_read,
+                                                            num_refinements = num_refinements,
+                                                            previous_data = previous_data,
+                                                            priority = next_priority)
+            self.dependents.append(next_progressive_task)
+
+def execute_progressive_download(model, offset, length, refinements_read, num_refinements, previous_data):
+    """Execute function for a ProgressiveDownloadTask"""
+    return open3dhub.download_progressive(model, offset, length, refinements_read, num_refinements, previous_data)
 
 class LoadTask(Task):
     """Task for loading a model using pycollada and turning it into 

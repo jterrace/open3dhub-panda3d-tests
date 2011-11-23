@@ -10,6 +10,7 @@ import os
 import numpy
 import collada
 from meshtool.filters.panda_filters import pandacore
+from meshtool.filters.panda_filters import pdae_utils
 from panda3d.core import GeomNode, NodePath, Mat4
 
 import load_scheduler
@@ -18,6 +19,8 @@ BASE_URL = 'http://open3dhub.com'
 BROWSE_URL = BASE_URL + '/api/browse'
 DOWNLOAD_URL = BASE_URL + '/download'
 DNS_URL = BASE_URL + '/dns'
+
+PROGRESSIVE_CHUNK_SIZE = 100 * 1024
 
 CURDIR = os.path.dirname(__file__)
 TEMPDIR = os.path.join(CURDIR, '.temp_models')
@@ -96,6 +99,17 @@ def download_mesh_and_subtasks(model):
     
     texture_task_base = None
     
+    progressive_hash = type_dict.get('progressive_stream')
+    progressive_task = None
+    if progressive_hash is not None:
+        progressive_task = load_scheduler.ProgressiveDownloadTask(model,
+                                                                  0,
+                                                                  PROGRESSIVE_CHUNK_SIZE,
+                                                                  priority = model.solid_angle,
+                                                                  refinements_read = 0,
+                                                                  num_refinements = None,
+                                                                  previous_data = '')
+    
     for subfile in type_dict['subfiles']:
         splitpath = subfile.split('/')
         basename = splitpath[-2]
@@ -141,15 +155,14 @@ def download_mesh_and_subtasks(model):
     load_task = load_scheduler.LoadTask(data, subfile_dict, model, priority=model.solid_angle)
     if texture_task_base is not None:
         load_task.dependents.append(texture_task_base)
+    if progressive_task is not None:
+        load_task.dependents.append(progressive_task)
     return [load_task]
 
 def download_texture(model, download_offset):
     """Given a model and texture offset, downloads the texture"""
     
     types = model.model_json['metadata']['types']
-    if not model.model_type in types:
-        return None
-    
     type_dict = types[model.model_type]
     
     mipmaps = type_dict.get('mipmaps')
@@ -169,6 +182,21 @@ def download_texture(model, download_offset):
         if offset == download_offset:
             texture_data = hashfetch(tar_hash, httprange=(offset, length))
             return texture_data
+
+def download_progressive(model, offset, length, refinements_read, num_refinements, previous_data):
+    """Given a model, offset and length, download progressive hash data"""
+    
+    types = model.model_json['metadata']['types']
+    type_dict = types[model.model_type]
+    progressive_hash = type_dict['progressive_stream']
+    
+    data = hashfetch(progressive_hash, httprange=(offset, length))
+    
+    if previous_data is not None:
+        data = previous_data + data
+
+    return pdae_utils.readPDAEPartial(data, refinements_read, num_refinements)
+    
 
 def load_into_bamfile(meshdata, subfiles, model):
     """Uses pycollada and panda3d to load meshdata and subfiles and
