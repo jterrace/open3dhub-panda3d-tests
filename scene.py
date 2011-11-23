@@ -64,6 +64,23 @@ def filter_too_complicated(models):
     
     return filtered
 
+BAD_LIST = set(['/ayyyeung/models/tree.dae',
+                '/kittyvision/house21.dae',
+                '/emily2e/models/apartment_smallLuxury.dae',
+                '/echeslack/chess.dae',
+                '/kittyvision/apartment1.dae',
+                '/zhihongmax/RX_0_Unicorn_Gundam.dae',
+                '/emily2e/models/roadblock.dae',
+                '/cedar/McLaren_F1_LM.dae'])
+def filter_bad_list(models):
+    """Filters out models that are known to be bad"""
+    
+    filtered = []
+    for m in models:
+        if m['base_path'] not in BAD_LIST:
+            filtered.append(m)
+    return filtered
+
 def filter_for_demo(models):
     """Filters out models that we don't want to use for the demo"""
     
@@ -72,6 +89,7 @@ def filter_for_demo(models):
     models = filter_large_triangles(models)
     models = filter_no_textures(models)
     models = filter_too_complicated(models)
+    models = filter_bad_list(models)
     
     return models
 

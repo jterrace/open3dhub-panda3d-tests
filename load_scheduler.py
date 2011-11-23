@@ -121,7 +121,7 @@ class ProgressiveDownloadTask(DownloadTask):
         self.refinements = refinements
         
         next_priority = self.model.solid_angle * \
-                (math.sqrt(open3dhub.PROGRESSIVE_CHUNK_SIZE) /
+                (math.sqrt(0.3 * open3dhub.PROGRESSIVE_CHUNK_SIZE) /
                  math.sqrt(self.offset + self.length + open3dhub.PROGRESSIVE_CHUNK_SIZE))
         
         if refinements_read < num_refinements:

@@ -15,12 +15,12 @@ from panda3d.core import GeomNode, NodePath, Mat4
 
 import load_scheduler
 
-BASE_URL = 'http://open3dhub.com'
+BASE_URL = 'http://singular.stanford.edu' #'http://open3dhub.com'
 BROWSE_URL = BASE_URL + '/api/browse'
 DOWNLOAD_URL = BASE_URL + '/download'
 DNS_URL = BASE_URL + '/dns'
 
-PROGRESSIVE_CHUNK_SIZE = 100 * 1024
+PROGRESSIVE_CHUNK_SIZE = 500 * 1024
 
 CURDIR = os.path.dirname(__file__)
 TEMPDIR = os.path.join(CURDIR, '.temp_models')
