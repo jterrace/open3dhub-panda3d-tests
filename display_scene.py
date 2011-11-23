@@ -39,8 +39,11 @@ FORCE_DOWNLOAD = None
 MODEL_TYPE = None
 NUM_MODELS = None
 SEED = None
+SAVE_SS = None
 NUM_DOWNLOAD_PROCS = multiprocessing.cpu_count()
 NUM_LOAD_PROCS = multiprocessing.cpu_count()
+START_TIME = 0
+LAST_SCREENSHOT = 0
 
 class MyBase(ShowBase):
     def __init__(self):
@@ -146,11 +149,25 @@ class LoadingThread(threading.Thread):
         except (KeyboardInterrupt, SystemExit):
             return
 
+screenshot_next_frame = -1
+def doScreenshot():
+    this_timestamp = (time.clock() - START_TIME)
+    global LAST_SCREENSHOT, screenshot_next_frame
+    if this_timestamp - LAST_SCREENSHOT > 0.5 and SAVE_SS is not None:
+        LAST_SCREENSHOT = this_timestamp
+        base.win.saveScreenshot(os.path.join(SAVE_SS, ('%.7g' % this_timestamp) + '.png'))
+    screenshot_next_frame = -1
+    
+def triggerScreenshot():
+    global screenshot_next_frame
+    screenshot_next_frame = 2
+
 def modelLoaded(np):
     print 'Model loaded'
     np.reparentTo(render)
     base.num_models_loaded += 1
     base.txtModelsLoaded.setText('Models Loaded: %d/%d' % (base.num_models_loaded, NUM_MODELS))
+    triggerScreenshot()
 
 class ActionType(object):
     LOAD_MODEL = 0
@@ -158,6 +175,12 @@ class ActionType(object):
     PROGRESSIVE_ADDITION = 2
 
 def checkForLoad(task):
+    global screenshot_next_frame
+    if screenshot_next_frame != -1:
+        screenshot_next_frame -= 1
+        if screenshot_next_frame <= 0:
+            doScreenshot()
+    
     try:
         action = load_queue.get_nowait()
     except Queue.Empty:
@@ -187,6 +210,7 @@ def checkForLoad(task):
         
         np.setTextureOff(1)
         np.setTexture(newtex, 1)
+        triggerScreenshot()
     
     elif action_type == ActionType.PROGRESSIVE_ADDITION:
         model = action[1]
@@ -235,6 +259,7 @@ def checkForLoad(task):
                     uvwriter.addData2f(vals[7], vals[8])
     
         print '---JUST UPDATED ' + model.model_json['base_path'] + ' ----'
+        triggerScreenshot()
     
     return task.cont
 
@@ -246,6 +271,7 @@ def main():
     parser.add_argument('type', help='Model type to use', choices=['optimized', 'progressive'])
     parser.add_argument('num_models', help='Number of models to use', type=int)
     parser.add_argument('--seed', required=False, help='Seed for random number generator', type=str)
+    parser.add_argument('--screenshots', required=False, help='Directory to save screenshots', type=str)
     
     args = parser.parse_args()
     
@@ -253,14 +279,26 @@ def main():
     global MODEL_TYPE
     global NUM_MODELS
     global SEED
+    global SAVE_SS
+    global START_TIME
+    global LAST_SCREENSHOT
     
     FORCE_DOWNLOAD = args.force
     MODEL_TYPE = args.type
     NUM_MODELS = args.num_models
     SEED = args.seed
+    SAVE_SS = args.screenshots
     
     if SEED is not None:
         random.seed(SEED)
+        
+    if SAVE_SS is not None:
+        if not os.path.isdir(SAVE_SS):
+            print >> sys.stderr, 'Invalid screenshots directory'
+            parser.print_usage()
+            sys.exit(1)
+    START_TIME = time.clock()
+    LAST_SCREENSHOT = time.clock()
     
     global base, render, taskMgr, loader
     base = MyBase()
