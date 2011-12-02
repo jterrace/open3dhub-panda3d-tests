@@ -105,3 +105,15 @@ def get_demo_models(force=False):
     cPickle.dump(demo_models, open(demo_model_file, 'w'), protocol=cPickle.HIGHEST_PROTOCOL)
     
     return demo_models
+
+def get_all_models(force=False):
+    """Returns all models. Loads from a cache unless force is set to True"""
+    
+    all_model_file = os.path.join(CURDIR, ".all-models")
+    if not force and os.path.isfile(all_model_file):
+        return cPickle.load(open(all_model_file, 'r'))
+    
+    all_cdn_models = open3dhub.get_list(100000)
+    cPickle.dump(all_cdn_models, open(all_model_file, 'w'), protocol=cPickle.HIGHEST_PROTOCOL)
+    
+    return all_cdn_models

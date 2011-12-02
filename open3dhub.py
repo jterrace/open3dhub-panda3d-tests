@@ -11,6 +11,7 @@ import numpy
 import collada
 from meshtool.filters.panda_filters import pandacore
 from meshtool.filters.panda_filters import pdae_utils
+from meshtool.filters.simplify_filters import add_back_pm
 from panda3d.core import GeomNode, NodePath, Mat4
 
 import load_scheduler
@@ -81,10 +82,16 @@ def download_mesh_and_subtasks(model):
     """Given a model, downloads the mesh and returns a set of subtasks."""
     
     types = model.model_json['metadata']['types']
-    if not model.model_type in types:
+    model_type = model.model_type
+    if model_type == 'optimized_unflattened':
+        model_type = 'optimized'
+    elif model_type == 'progressive_full':
+        model_type = 'progressive'
+    
+    if not model_type in types:
         return None
     
-    type_dict = types[model.model_type]
+    type_dict = types[model_type]
     
     mipmaps = type_dict.get('mipmaps')
     if mipmaps:
@@ -144,7 +151,7 @@ def download_mesh_and_subtasks(model):
                 texture_task_base = tex_dt
         
         else:
-            texture_path = posixpath.normpath(posixpath.join(model.model_json['base_path'], model.model_type, model.model_json['version_num'], basename))
+            texture_path = posixpath.normpath(posixpath.join(model.model_json['base_path'], model_type, model.model_json['version_num'], basename))
             texture_url = DNS_URL + texture_path
             texture_json = json.loads(urlfetch(texture_url))
             texture_hash = texture_json['Hash']
@@ -203,6 +210,20 @@ def load_into_bamfile(meshdata, subfiles, model):
     write out to a bam file on disk"""
     
     mesh = load_mesh(meshdata, subfiles)
+    model_name = model.model_json['full_path'].replace('/', '_')
+    bam_temp = os.path.join(TEMPDIR, model_name + '.' + model.model_type + '.bam')
+    
+    if model.model_type == 'progressive_full':
+        progressive_stream = model.model_json['metadata']['types']['progressive'].get('progressive_stream')
+        if progressive_stream is not None:
+            print 'LOADING PROGRESSIVE STREAM'
+            data = hashfetch(progressive_stream)
+            try:
+                mesh = add_back_pm.add_back_pm(mesh, StringIO(data), 100)
+            except:
+                f = open(bam_temp, 'w')
+                f.close()
+                raise
 
     print 'got mesh', mesh
     scene_members = pandacore.getSceneMembers(mesh)
@@ -226,17 +247,13 @@ def load_into_bamfile(meshdata, subfiles, model):
         geomPath = rotatePath.attachNewNode(node)
         geomPath.setMat(mat4)
 
-    rotatePath.flattenStrong()
+    if model.model_type != 'optimized_unflattened':
+        rotatePath.flattenStrong()
     
     wrappedNode = pandacore.centerAndScale(rotatePath)
-    wrappedNode.setPos(model.x, model.y, model.z)
-    wrappedNode.setScale(model.scale, model.scale, model.scale)
-    minPt, maxPt = wrappedNode.getTightBounds()
-    zRange = math.fabs(minPt.getZ() - maxPt.getZ())
-    wrappedNode.setPos(model.x, model.y, zRange / 2.0)
-    wrappedNode.setName(model.model_json['base_path'].replace('/', '_'))
+    wrappedNode.setName(model_name)
     
-    bam_temp = tempfile.mktemp('.bam', dir=TEMPDIR)
     wrappedNode.writeBamFile(bam_temp)
+    wrappedNode = None
     
     return bam_temp

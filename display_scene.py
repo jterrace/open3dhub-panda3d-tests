@@ -36,6 +36,7 @@ CURDIR = os.path.dirname(__file__)
 TEMPDIR = os.path.join(CURDIR, '.temp_models')
 
 FORCE_DOWNLOAD = None
+FORCE_MODEL_DOWNLOAD = None
 MODEL_TYPE = None
 NUM_MODELS = None
 SEED = None
@@ -77,11 +78,12 @@ def solid_angle(cameraLoc, objLoc, objRadius):
     return 2.0 * math.pi * (1.0 - cos_alpha)
 
 def gen_x_y(num_models):
-    grid_size = int(math.sqrt(num_models))
-    for x in range(grid_size):
-        for y in range(grid_size):
-            yield ((float(x + 0.5 + random.uniform(-0.2,0.2)) / grid_size) * 16000 - 8000,
-                   (float(y + 0.5 + random.uniform(-0.2,0.2)) / grid_size) * 16000 - 8000)
+    X_SIZE = 3
+    Y_SIZE = int(math.ceil(float(num_models) / X_SIZE))
+    for x in range(X_SIZE):
+        for y in range(Y_SIZE):
+            yield ((float(x + 0.5 + random.uniform(-0.2,0.2)) / X_SIZE) * 16000 - 8000,
+                   (float(y + 0.5 + random.uniform(-0.2,0.2))) * -8000 + 8000)
 
 class LoadingThread(threading.Thread):
     def _run(self):
@@ -102,6 +104,7 @@ class LoadingThread(threading.Thread):
         xygen = gen_x_y(len(chosen))
         for model_index in chosen:
             x, y = next(xygen)
+            
             model = load_scheduler.Model(model_json = demo_models[model_index],
                                 model_type = MODEL_TYPE,
                                 x = x,
@@ -110,8 +113,14 @@ class LoadingThread(threading.Thread):
                                 scale = random.uniform(0.5, 6.0))
             model.solid_angle = solid_angle(Vec3(0, 30000, 10000), Vec3(model.x, model.y, model.z), model.scale * 1000)
             
-            dt = load_scheduler.ModelDownloadTask(model, priority=model.solid_angle * 100)
-            download_pool.add_task(dt)
+            model.bam_file = model.model_json['full_path'].replace('/', '_')
+            model.bam_file = os.path.join(TEMPDIR, model.bam_file + '.' + model.model_type + '.bam')
+            if os.path.isfile(model.bam_file):
+                print 'Loading cached model', model.bam_file
+                load_queue.put((ActionType.LOAD_MODEL, model))
+            else:
+                dt = load_scheduler.ModelDownloadTask(model, priority=model.solid_angle * 100)
+                download_pool.add_task(dt)
         
         while not(download_pool.empty() and loader_pool.empty()):
             finished_tasks = download_pool.poll() + loader_pool.poll()
@@ -162,11 +171,19 @@ def triggerScreenshot():
     global screenshot_next_frame
     screenshot_next_frame = 2
 
-def modelLoaded(np):
+def modelLoaded(np, model):
     print 'Model loaded'
+    np.setPos(model.x, model.y, model.z)
+    np.setScale(model.scale, model.scale, model.scale)
+    minPt, maxPt = np.getTightBounds()
+    zRange = math.fabs(minPt.getZ() - maxPt.getZ())
+    np.setPos(model.x, model.y, zRange / 2.0)
     np.reparentTo(render)
     base.num_models_loaded += 1
     base.txtModelsLoaded.setText('Models Loaded: %d/%d' % (base.num_models_loaded, NUM_MODELS))
+    if base.num_models_loaded >= NUM_MODELS:
+        print 'Exiting because all models are loaded.'
+        sys.exit(0)
     triggerScreenshot()
 
 class ActionType(object):
@@ -181,6 +198,8 @@ def checkForLoad(task):
         if screenshot_next_frame <= 0:
             doScreenshot()
     
+    #print globalClock.getAverageFrameRate()
+    
     try:
         action = load_queue.get_nowait()
     except Queue.Empty:
@@ -193,7 +212,7 @@ def checkForLoad(task):
     
     if action_type == ActionType.LOAD_MODEL:
         model = action[1]
-        loader.loadModel(model.bam_file, callback=modelLoaded)
+        loader.loadModel(model.bam_file, callback=modelLoaded, extraArgs=[model])
     
     elif action_type == ActionType.UPDATE_TEXTURE:
         model = action[1]
@@ -205,7 +224,7 @@ def checkForLoad(task):
         newtex = Texture()
         newtex.load(texpnm)
         
-        path_search = '**/' + model.model_json['base_path'].replace('/', '_') + '*'
+        path_search = '**/' + model.model_json['full_path'].replace('/', '_') + '*'
         np = render.find(path_search)
         
         np.setTextureOff(1)
@@ -216,7 +235,7 @@ def checkForLoad(task):
         model = action[1]
         refinements = action[2]
         
-        path_search = '**/' + model.model_json['base_path'].replace('/', '_') + '*'
+        path_search = '**/' + model.model_json['full_path'].replace('/', '_') + '*'
         np = render.find(path_search)
         
         np = np.find("**/primitive")
@@ -258,7 +277,7 @@ def checkForLoad(task):
                     normalwriter.addData3f(vals[4], vals[5], vals[6])
                     uvwriter.addData2f(vals[7], vals[8])
     
-        print '---JUST UPDATED ' + model.model_json['base_path'] + ' ----'
+        print '---JUST UPDATED ' + model.model_json['full_path'] + ' ----'
         triggerScreenshot()
     
     return task.cont
@@ -267,6 +286,7 @@ def main():
     
     parser = argparse.ArgumentParser(description='Tool for displaying a scene from open3dhub')
     
+    parser.add_argument('--force-model-download', dest='force_model', action='store_true', help='Force re-downloading models')
     parser.add_argument('--force-download', dest='force', action='store_true', help='Force re-downloading of model list')
     parser.add_argument('type', help='Model type to use', choices=['optimized', 'progressive'])
     parser.add_argument('num_models', help='Number of models to use', type=int)
@@ -276,6 +296,7 @@ def main():
     args = parser.parse_args()
     
     global FORCE_DOWNLOAD
+    global FORCE_MODEL_DOWNLOAD
     global MODEL_TYPE
     global NUM_MODELS
     global SEED
@@ -284,6 +305,7 @@ def main():
     global LAST_SCREENSHOT
     
     FORCE_DOWNLOAD = args.force
+    FORCE_MODEL_DOWNLOAD = args.force_model
     MODEL_TYPE = args.type
     NUM_MODELS = args.num_models
     SEED = args.seed
@@ -306,11 +328,15 @@ def main():
     taskMgr = base.taskMgr
     loader = base.loader
     
+    if FORCE_MODEL_DOWNLOAD:
+        try:
+            shutil.rmtree(TEMPDIR)
+        except OSError:
+            pass
     try:
-        shutil.rmtree(TEMPDIR)
+        os.mkdir(TEMPDIR)
     except OSError:
         pass
-    os.mkdir(TEMPDIR)
     
     base.disableMouse()
     pandacore.attachLights(render)
