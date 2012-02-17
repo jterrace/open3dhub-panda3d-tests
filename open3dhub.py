@@ -1,11 +1,11 @@
 import json
-import urllib2
 import posixpath
 from StringIO import StringIO
 import gzip
 import tempfile
 import math
 import os
+import requests
 
 import numpy
 import collada
@@ -16,7 +16,7 @@ from panda3d.core import GeomNode, NodePath, Mat4
 
 import load_scheduler
 
-BASE_URL = 'http://singular.stanford.edu' #'http://open3dhub.com'
+BASE_URL = 'http://open3dhub.com'
 BROWSE_URL = BASE_URL + '/api/browse'
 DOWNLOAD_URL = BASE_URL + '/download'
 DNS_URL = BASE_URL + '/dns'
@@ -30,17 +30,15 @@ def urlfetch(url, httprange=None):
     """Fetches the given URL and returns data from it.
     Will take care of gzip if enabled on server."""
     
-    request = urllib2.Request(url)
-    request.add_header('Accept-encoding', 'gzip')
+    headers = {}
     if httprange is not None:
         offset, length = httprange
-        request.add_header('Range', 'bytes=%d-%d' % (offset, offset+length-1))
-    response = urllib2.urlopen(request)
-    if response.info().get('Content-Encoding') == 'gzip':
-        buf = StringIO(response.read())
-        response = gzip.GzipFile(fileobj=buf)
+        headers['Range'] = 'bytes=%d-%d' % (offset, offset+length-1)
     
-    return response.read()
+    resp = requests.get(url, headers=headers)
+    
+    return resp.content
+    
 
 def hashfetch(dlhash, httprange=None):
     """Fetches the given hash and returns data from it."""
