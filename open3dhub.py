@@ -6,6 +6,7 @@ import tempfile
 import math
 import os
 import requests
+import time
 
 import numpy
 import collada
@@ -17,14 +18,17 @@ from panda3d.core import GeomNode, NodePath, Mat4
 import load_scheduler
 
 BASE_URL = 'http://open3dhub.com'
+# 'http://singular.stanford.edu'
 BROWSE_URL = BASE_URL + '/api/browse'
 DOWNLOAD_URL = BASE_URL + '/download'
 DNS_URL = BASE_URL + '/dns'
 
-PROGRESSIVE_CHUNK_SIZE = 500 * 1024
+PROGRESSIVE_CHUNK_SIZE = 1024 * 1024 # 1 MB
 
 CURDIR = os.path.dirname(__file__)
 TEMPDIR = os.path.join(CURDIR, '.temp_models')
+
+REQUESTS_SESSION = requests.session()
 
 def urlfetch(url, httprange=None):
     """Fetches the given URL and returns data from it.
@@ -35,7 +39,7 @@ def urlfetch(url, httprange=None):
         offset, length = httprange
         headers['Range'] = 'bytes=%d-%d' % (offset, offset+length-1)
     
-    resp = requests.get(url, headers=headers)
+    resp = REQUESTS_SESSION.get(url, headers=headers)
     
     return resp.content
     
@@ -61,6 +65,35 @@ def get_list(limit=20):
         all_items = all_items[0:limit]
         
     return all_items
+
+def get_hash_sizes(items):
+
+    hash_keys = ['zip', 'screenshot', 'hash', 'thumbnail',
+                 'progressive_stream', 'panda3d_base_bam',
+                 'panda3d_full_bam', 'panda3d_bam']
+    
+    unique_keys = set()
+    for item in items:
+        
+        for type_name, type_data in item['metadata']['types'].iteritems():
+        
+            for hash_key in hash_keys:
+                hash_key_val = type_data.get(hash_key)
+                if hash_key_val is not None:
+                    unique_keys.add(type_data[hash_key])
+                    
+            #progressive mipmaps are nested
+            if 'mipmaps' in type_data:
+                for mipmap_data in type_data['mipmaps'].itervalues():
+                    unique_keys.add(mipmap_data['hash'])
+        
+    hash_sizes = {}
+    for hash in unique_keys:
+        resp = REQUESTS_SESSION.get(DOWNLOAD_URL + '/' + hash)
+        hash_sizes[hash] = {'size': len(resp.content),
+                            'gzip_size': int(resp.headers['content-length'])}
+    
+    return hash_sizes
 
 def load_mesh(mesh_data, subfiles):
     """Given a downloaded mesh, return a collada instance"""
@@ -97,20 +130,35 @@ def download_mesh_and_subtasks(model):
     
     mesh_hash = type_dict['hash']
     
-    print 'Downloading mesh', model.model_json['base_path'], mesh_hash
+    panda3d_key = 'panda3d_%s_bam' % model.model_subtype if model_type == 'progressive' else 'panda3d_bam'
+    is_bam = False
+    if panda3d_key in type_dict:
+        bam_hash = type_dict[panda3d_key]
+        print 'Downloading mesh (from bamfile)', model.model_json['base_path'], bam_hash
+        data = hashfetch(bam_hash)
+        is_bam = True
+    else:
+        print 'Downloading mesh', model.model_json['base_path'], mesh_hash
+        data = hashfetch(mesh_hash)
     
-    data = hashfetch(mesh_hash)
     subfile_dict = {}
     
     texture_task_base = None
     
     progressive_hash = type_dict.get('progressive_stream')
     progressive_task = None
-    if progressive_hash is not None:
+    if progressive_hash is not None and model.model_subtype != 'full':
+        # priority is the solid angle
+        priority = model.solid_angle
+        # multiplied by the percentage that this chunk is of the total size
+        priority = priority * min(float(PROGRESSIVE_CHUNK_SIZE) / model.HASH_SIZES[progressive_hash]['size'], 1.0)
+        # divided by the gzip size
+        priority = priority / model.HASH_SIZES[progressive_hash]['gzip_size']
+        
         progressive_task = load_scheduler.ProgressiveDownloadTask(model,
                                                                   0,
                                                                   PROGRESSIVE_CHUNK_SIZE,
-                                                                  priority = model.solid_angle,
+                                                                  priority = priority,
                                                                   refinements_read = 0,
                                                                   num_refinements = None,
                                                                   previous_data = '')
@@ -119,7 +167,7 @@ def download_mesh_and_subtasks(model):
         splitpath = subfile.split('/')
         basename = splitpath[-2]
         
-        if mipmaps is not None and basename in mipmaps:
+        if mipmaps is not None and basename in mipmaps and model.model_subtype != 'full':
             mipmap_levels = mipmaps[basename]['byte_ranges']
             tar_hash = mipmaps[basename]['hash']
             
@@ -133,22 +181,30 @@ def download_mesh_and_subtasks(model):
                 if mipmap['width'] >= 128 or mipmap['height'] >= 128:
                     break
 
-            texture_data = hashfetch(tar_hash, httprange=(offset, length))
-            subfile_dict[basename] = texture_data
+            if not is_bam:
+                texture_data = hashfetch(tar_hash, httprange=(offset, length))
+                subfile_dict[basename] = texture_data
             
             for mipmap in reversed(mipmap_levels):
                 mipmap_pixels = mipmap['width'] * mipmap['height']
                 if mipmap_pixels <= base_pixels:
                     break
 
-                priority = math.sqrt(float(base_pixels) / mipmap_pixels)
+                # priority is the solid angle
+                priority = model.solid_angle
+                # multiplied by a factor to make smaller textures higher priority over larger
+                priority = priority * math.sqrt(float(base_pixels) / mipmap_pixels)
+                # multiplied by how big this tar range is relative to the total size
+                priority = priority * (float(mipmap['length']) / model.HASH_SIZES[tar_hash]['size'])
+                # divided by the gzip size
+                priority = priority / model.HASH_SIZES[tar_hash]['gzip_size']
                 
-                tex_dt = load_scheduler.TextureDownloadTask(model, mipmap['offset'], priority=model.solid_angle * priority)
+                tex_dt = load_scheduler.TextureDownloadTask(model, mipmap['offset'], priority=priority)
                 if texture_task_base is not None:
                     tex_dt.dependents.append(texture_task_base)
                 texture_task_base = tex_dt
         
-        else:
+        elif model.model_subtype != 'full':
             texture_path = posixpath.normpath(posixpath.join(model.model_json['base_path'], model_type, model.model_json['version_num'], basename))
             texture_url = DNS_URL + texture_path
             texture_json = json.loads(urlfetch(texture_url))
@@ -157,7 +213,7 @@ def download_mesh_and_subtasks(model):
     
             subfile_dict[basename] = texture_data
     
-    load_task = load_scheduler.LoadTask(data, subfile_dict, model, priority=model.solid_angle)
+    load_task = load_scheduler.LoadTask(data, subfile_dict, model, priority=model.solid_angle, is_bam=is_bam)
     if texture_task_base is not None:
         load_task.dependents.append(texture_task_base)
     if progressive_task is not None:
@@ -194,22 +250,24 @@ def download_progressive(model, offset, length, refinements_read, num_refinement
     types = model.model_json['metadata']['types']
     type_dict = types[model.model_type]
     progressive_hash = type_dict['progressive_stream']
-    
+
     data = hashfetch(progressive_hash, httprange=(offset, length))
     
     if previous_data is not None:
         data = previous_data + data
 
-    return pdae_utils.readPDAEPartial(data, refinements_read, num_refinements)
+    refinements = pdae_utils.readPDAEPartial(data, refinements_read, num_refinements)
+    
+    return refinements
     
 
 def load_into_bamfile(meshdata, subfiles, model):
     """Uses pycollada and panda3d to load meshdata and subfiles and
     write out to a bam file on disk"""
-    
+
+    assert False
     mesh = load_mesh(meshdata, subfiles)
     model_name = model.model_json['full_path'].replace('/', '_')
-    bam_temp = os.path.join(TEMPDIR, model_name + '.' + model.model_type + '.bam')
     
     if model.model_type == 'progressive_full':
         progressive_stream = model.model_json['metadata']['types']['progressive'].get('progressive_stream')
@@ -219,7 +277,7 @@ def load_into_bamfile(meshdata, subfiles, model):
             try:
                 mesh = add_back_pm.add_back_pm(mesh, StringIO(data), 100)
             except:
-                f = open(bam_temp, 'w')
+                f = open(model.bam_file, 'w')
                 f.close()
                 raise
 
@@ -251,7 +309,7 @@ def load_into_bamfile(meshdata, subfiles, model):
     wrappedNode = pandacore.centerAndScale(rotatePath)
     wrappedNode.setName(model_name)
     
-    wrappedNode.writeBamFile(bam_temp)
+    wrappedNode.writeBamFile(model.bam_file)
     wrappedNode = None
     
-    return bam_temp
+    return model.bam_file

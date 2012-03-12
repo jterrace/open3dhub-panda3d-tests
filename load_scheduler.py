@@ -14,6 +14,7 @@ class Model(object):
         self.scale = scale
         self.solid_angle = 0.0
         self.model_type = model_type
+        self.model_subtype = None
         self.bam_file = None
     
     def __str__(self):
@@ -120,9 +121,16 @@ class ProgressiveDownloadTask(DownloadTask):
         
         self.refinements = refinements
         
-        next_priority = self.model.solid_angle * \
-                (math.sqrt(0.3 * open3dhub.PROGRESSIVE_CHUNK_SIZE) /
-                 math.sqrt(self.offset + self.length + open3dhub.PROGRESSIVE_CHUNK_SIZE))
+        types = self.model.model_json['metadata']['types']
+        type_dict = types[self.model.model_type]
+        progressive_hash = type_dict['progressive_stream']
+        
+        # priority is the solid angle
+        priority = self.model.solid_angle
+        # multiplied by the percentage that this chunk is of the total size
+        priority = priority * min(float(open3dhub.PROGRESSIVE_CHUNK_SIZE) / self.model.HASH_SIZES[progressive_hash]['size'], 1.0)
+        # divided by the gzip size
+        priority = priority / self.model.HASH_SIZES[progressive_hash]['gzip_size']
         
         if refinements_read < num_refinements:
             next_progressive_task = ProgressiveDownloadTask(self.model,
@@ -131,8 +139,13 @@ class ProgressiveDownloadTask(DownloadTask):
                                                             refinements_read = refinements_read,
                                                             num_refinements = num_refinements,
                                                             previous_data = previous_data,
-                                                            priority = next_priority)
+                                                            priority = priority)
             self.dependents.append(next_progressive_task)
+            
+    def __str__(self):
+        return '<ProgressiveDownloadTask refinements_read=%s, num_refinements=%s>' % (self.refinements_read, self.num_refinements)
+    def __repr__(self):
+        return str(self)
 
 def execute_progressive_download(model, offset, length, refinements_read, num_refinements, previous_data):
     """Execute function for a ProgressiveDownloadTask"""
@@ -142,18 +155,27 @@ class LoadTask(Task):
     """Task for loading a model using pycollada and turning it into 
     a bam file for loading"""
     
-    def __init__(self, meshdata, subfiles, model, *args, **kwargs):
+    def __init__(self, meshdata, subfiles, model, is_bam=False, *args, **kwargs):
         super(LoadTask, self).__init__(*args, **kwargs)
         self.meshdata = meshdata
         self.subfiles = subfiles
         self.model = model
+        self.is_bam = is_bam
     
     def run(self, pool):
-        return pool.apply_async(execute_load, (self.meshdata, self.subfiles, self.model))
+        torun = execute_load
+        if self.is_bam:
+            torun = null_load
+        return pool.apply_async(torun, (self.meshdata, self.subfiles, self.model))
     
     def finished(self, result):
         print 'finished load task'
-        self.model.bam_file = result
+        
+def null_load(meshdata, subfiles, model):
+    f = open(model.bam_file, 'wb')
+    f.write(meshdata)
+    f.close()
+    return model.bam_file
         
 def execute_load(meshdata, subfiles, model):
     """Execute function for LoadTask"""

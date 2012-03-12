@@ -81,6 +81,37 @@ def filter_bad_list(models):
             filtered.append(m)
     return filtered
 
+def filter_non_panda3d(models):
+    """Filters out models that don't have panda3d files generated"""
+    
+    filtered = []
+    for m in models:
+        types = m['metadata']['types']
+        if 'progressive' not in types:
+            continue
+        progressive = types['progressive']
+        if 'panda3d_base_bam' in progressive and 'panda3d_full_bam' in progressive:
+            filtered.append(m)
+    return filtered
+
+def filter_non_big(models):
+    filtered = []
+    for m in models:
+        optimized = m['metadata']['types']['optimized']
+        num_triangles = optimized['metadata']['num_triangles']
+        if num_triangles > 20000:
+            filtered.append(m)
+    return filtered
+
+def filter_non_small(models):
+    filtered = []
+    for m in models:
+        optimized = m['metadata']['types']['optimized']
+        num_triangles = optimized['metadata']['num_triangles']
+        if num_triangles <= 20000:
+            filtered.append(m)
+    return filtered
+
 def filter_for_demo(models):
     """Filters out models that we don't want to use for the demo"""
     
@@ -105,6 +136,16 @@ def get_demo_models(force=False):
     cPickle.dump(demo_models, open(demo_model_file, 'w'), protocol=cPickle.HIGHEST_PROTOCOL)
     
     return demo_models
+
+def get_progressive_models(force=False):
+    """Returns all models that have a progressive format."""
+    
+    all_cdn_models = open3dhub.get_list(100000)
+    progressive_models = filter_non_progressive(all_cdn_models)
+    progressive_models = filter_bad_list(progressive_models)
+    progressive_models = filter_non_panda3d(progressive_models)
+    
+    return progressive_models
 
 def get_all_models(force=False):
     """Returns all models. Loads from a cache unless force is set to True"""

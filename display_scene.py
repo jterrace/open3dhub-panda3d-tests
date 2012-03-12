@@ -1,10 +1,12 @@
 import os
 import sys
-import time
+import thread
 import threading
+import time
 import Queue
 from multiprocessing.pool import Pool
 import multiprocessing
+import pickle
 import random
 import shutil
 import math
@@ -14,7 +16,7 @@ from direct.gui.OnscreenText import OnscreenText
 from panda3d.core import TransparencyAttrib, AntialiasAttrib, TextureAttrib, TextureStage
 from panda3d.core import VBase4, Vec3
 from panda3d.core import PNMImage, Texture, StringStream, GeomNode
-from panda3d.core import GeomVertexRewriter, GeomVertexWriter, GeomVertexReader
+from panda3d.core import loadPrcFileData
 
 import argparse
 import collada
@@ -24,6 +26,9 @@ from meshtool.filters.panda_filters.pdae_utils import PM_OP
 
 import scene
 import load_scheduler
+from p3d_mesh_updater import update_nodepath
+
+loadPrcFileData('', 'win-size 1024 768')
 
 base = None
 render = None
@@ -35,30 +40,27 @@ load_queue = Queue.Queue()
 CURDIR = os.path.dirname(__file__)
 TEMPDIR = os.path.join(CURDIR, '.temp_models')
 
-FORCE_DOWNLOAD = None
 FORCE_MODEL_DOWNLOAD = None
-MODEL_TYPE = None
-NUM_MODELS = None
-SEED = None
 SAVE_SS = None
-NUM_DOWNLOAD_PROCS = multiprocessing.cpu_count()
+NUM_DOWNLOAD_PROCS = multiprocessing.cpu_count() * 2
 NUM_LOAD_PROCS = multiprocessing.cpu_count()
 START_TIME = 0
 LAST_SCREENSHOT = 0
+NUM_MODELS = None
+EXIT_AFTER = False
+MODEL_SUBTYPE = None
+MODEL_TYPE = None
+HASH_SIZES = None
 
 class MyBase(ShowBase):
     def __init__(self):
         ShowBase.__init__(self)
         
-        if MODEL_TYPE == 'progressive':
-            text = 'Progressive'
-        else:
-            text = 'Original'
-        
-        self.txtType = OnscreenText(text = text, pos = (-0.90, -0.89), scale = 0.15)
-        
         self.num_models_loaded = 0
-        self.txtModelsLoaded = OnscreenText(text = 'Models Loaded: %d/%d' % (0,NUM_MODELS), pos = (0.9, -0.81), scale = 0.08)
+        self.quit = False
+        self.quit_frame = sys.maxint
+        self.screenshot_frame = sys.maxint
+        #self.txtModelsLoaded = OnscreenText(text = 'Models Loaded: %d/%d' % (0,NUM_MODELS), pos = (0.9, -0.81), scale = 0.08)
         
     def userExit(self):
         sys.exit(0)
@@ -77,56 +79,56 @@ def solid_angle(cameraLoc, objLoc, objRadius):
     cos_alpha = math.sqrt(1.0 - sin_alpha * sin_alpha)
     return 2.0 * math.pi * (1.0 - cos_alpha)
 
-def gen_x_y(num_models):
-    X_SIZE = 3
-    Y_SIZE = int(math.ceil(float(num_models) / X_SIZE))
-    for x in range(X_SIZE):
-        for y in range(Y_SIZE):
-            yield ((float(x + 0.5 + random.uniform(-0.2,0.2)) / X_SIZE) * 16000 - 8000,
-                   (float(y + 0.5 + random.uniform(-0.2,0.2))) * -8000 + 8000)
-
 class LoadingThread(threading.Thread):
+    
+    def __init__(self, model_list):
+        super(LoadingThread, self).__init__()
+        self.model_list = model_list
+    
     def _run(self):
-        
-        demo_models = scene.get_demo_models(force=FORCE_DOWNLOAD)
-        print 'Loaded', len(demo_models), 'models'
-        
-        to_choose = range(len(demo_models))
-        chosen = []
-        while len(chosen) < NUM_MODELS:
-            rand_index = random.randrange(len(to_choose))
-            chosen_index = to_choose.pop(rand_index)
-            chosen.append(chosen_index)
         
         download_pool = load_scheduler.TaskPool(NUM_DOWNLOAD_PROCS)
         loader_pool = load_scheduler.TaskPool(NUM_LOAD_PROCS)
+        last_status = time.time()
         
-        xygen = gen_x_y(len(chosen))
-        for model_index in chosen:
-            x, y = next(xygen)
-            
-            model = load_scheduler.Model(model_json = demo_models[model_index],
-                                model_type = MODEL_TYPE,
-                                x = x,
-                                y = y,
-                                z = 0,
-                                scale = random.uniform(0.5, 6.0))
+        for model in self.model_list:
+            model.model_type = MODEL_TYPE
             model.solid_angle = solid_angle(Vec3(0, 30000, 10000), Vec3(model.x, model.y, model.z), model.scale * 1000)
-            
             model.bam_file = model.model_json['full_path'].replace('/', '_')
-            model.bam_file = os.path.join(TEMPDIR, model.bam_file + '.' + model.model_type + '.bam')
+            model.model_subtype = MODEL_SUBTYPE
+            model.HASH_SIZES = HASH_SIZES
+            extra_part = ''
+            if model.model_type == 'progressive':
+                extra_part = '.' + MODEL_SUBTYPE
+            model.bam_file = os.path.join(TEMPDIR, model.bam_file + '.' + model.model_type + '.' + model.model_type + extra_part + '.bam')
             if os.path.isfile(model.bam_file):
                 print 'Loading cached model', model.bam_file
                 load_queue.put((ActionType.LOAD_MODEL, model))
             else:
-                dt = load_scheduler.ModelDownloadTask(model, priority=model.solid_angle * 100)
+                
+                panda3d_key = 'panda3d_%s_bam' % model.model_subtype if model.model_type == 'progressive' else 'panda3d_bam'
+                panda3d_hash =  model.model_json['metadata']['types'][model.model_type][panda3d_key]
+                panda3d_size = HASH_SIZES[panda3d_hash]['gzip_size']
+                
+                # we want to normalize by file size
+                priority = model.solid_angle / float(panda3d_size)
+                # but then also boost by a lot so that progressive download tasks don't overtake
+                priority = priority * 100
+                
+                dt = load_scheduler.ModelDownloadTask(model, priority=priority)
                 download_pool.add_task(dt)
         
         while not(download_pool.empty() and loader_pool.empty()):
+            now = time.time()
+            if now - last_status > 5.0:
+                last_status = now
+                print 'Downloader has', len(download_pool.running), 'running and', len(download_pool.to_run), 'waiting'
+                print 'Loader has', len(loader_pool.running), 'running and', len(loader_pool.to_run), 'waiting'
+            
             finished_tasks = download_pool.poll() + loader_pool.poll()
             
             for finished_task in finished_tasks:
-                print 'finished task', type(finished_task), 'has', len(finished_task.dependents), 'dependents'
+                print 'finished task', finished_task, 'has', len(finished_task.dependents), 'dependents'
                 
                 for dependent in finished_task.dependents:
                     if isinstance(dependent, load_scheduler.DownloadTask):
@@ -151,28 +153,28 @@ class LoadingThread(threading.Thread):
             time.sleep(0.05)
             
         print 'Finished loading all models'
+        
+        if EXIT_AFTER:
+            print 'Exiting because all models are loaded.'
+            load_queue.put((ActionType.QUIT, ))
 
     def run(self):
         try:
             self._run()
         except (KeyboardInterrupt, SystemExit):
             return
-
-screenshot_next_frame = -1
-def doScreenshot():
-    this_timestamp = (time.clock() - START_TIME)
-    global LAST_SCREENSHOT, screenshot_next_frame
-    if this_timestamp - LAST_SCREENSHOT > 0.5 and SAVE_SS is not None:
-        LAST_SCREENSHOT = this_timestamp
-        base.win.saveScreenshot(os.path.join(SAVE_SS, ('%.7g' % this_timestamp) + '.png'))
-    screenshot_next_frame = -1
     
-def triggerScreenshot():
-    global screenshot_next_frame
-    screenshot_next_frame = 2
+def triggerScreenshot(task):
+    global LAST_SCREENSHOT
+    this_timestamp = (time.clock() - START_TIME)
+    if this_timestamp - LAST_SCREENSHOT >= 1.0:
+        LAST_SCREENSHOT = this_timestamp
+        base.screenshot_frame = globalClock.getFrameCount()
+        base.win.saveScreenshot(os.path.join(SAVE_SS, ('%07.2f' % this_timestamp) + '.png'))
+    return task.cont
 
 def modelLoaded(np, model):
-    print 'Model loaded'
+    print 'Model loaded', base.num_models_loaded
     np.setPos(model.x, model.y, model.z)
     np.setScale(model.scale, model.scale, model.scale)
     minPt, maxPt = np.getTightBounds()
@@ -180,23 +182,16 @@ def modelLoaded(np, model):
     np.setPos(model.x, model.y, zRange / 2.0)
     np.reparentTo(render)
     base.num_models_loaded += 1
-    base.txtModelsLoaded.setText('Models Loaded: %d/%d' % (base.num_models_loaded, NUM_MODELS))
-    if base.num_models_loaded >= NUM_MODELS:
-        print 'Exiting because all models are loaded.'
-        sys.exit(0)
-    triggerScreenshot()
+    base.quit_frame = globalClock.getFrameCount()
+    #base.txtModelsLoaded.setText('Models Loaded: %d/%d' % (base.num_models_loaded, NUM_MODELS))
 
 class ActionType(object):
     LOAD_MODEL = 0
     UPDATE_TEXTURE = 1
     PROGRESSIVE_ADDITION = 2
+    QUIT = 3
 
 def checkForLoad(task):
-    global screenshot_next_frame
-    if screenshot_next_frame != -1:
-        screenshot_next_frame -= 1
-        if screenshot_next_frame <= 0:
-            doScreenshot()
     
     #print globalClock.getAverageFrameRate()
     
@@ -204,6 +199,9 @@ def checkForLoad(task):
         action = load_queue.get_nowait()
     except Queue.Empty:
         action = None
+    
+    if action is None and base.num_models_loaded >= NUM_MODELS and base.quit and base.screenshot_frame > base.quit_frame:
+        sys.exit(0)
     
     if action is None:
         return task.cont
@@ -224,103 +222,81 @@ def checkForLoad(task):
         newtex = Texture()
         newtex.load(texpnm)
         
-        path_search = '**/' + model.model_json['full_path'].replace('/', '_') + '*'
+        path_search = '**/*' + model.model_json['full_path'].replace('/', '_') + '*'
         np = render.find(path_search)
         
         np.setTextureOff(1)
         np.setTexture(newtex, 1)
-        triggerScreenshot()
     
     elif action_type == ActionType.PROGRESSIVE_ADDITION:
         model = action[1]
         refinements = action[2]
         
-        path_search = '**/' + model.model_json['full_path'].replace('/', '_') + '*'
+        path_search = '**/*' + model.model_json['full_path'].replace('/', '_') + '*'
         np = render.find(path_search)
-        
         np = np.find("**/primitive")
-
-        geom = np.node().modifyGeom(0)
+        pnode = np.node()
         
-        vertdata = geom.modifyVertexData()
-        prim = geom.modifyPrimitive(0)
-        indexdata = prim.modifyVertices()
-        
-        indexrewriter = GeomVertexRewriter(indexdata)
-        indexrewriter.setColumn(0)
-        nextTriangleIndex = indexdata.getNumRows()
-        
-        vertwriter = GeomVertexWriter(vertdata, 'vertex')
-        numverts = vertdata.getNumRows()
-        vertwriter.setRow(numverts)
-        normalwriter = GeomVertexWriter(vertdata, 'normal')
-        normalwriter.setRow(numverts)
-        uvwriter = GeomVertexWriter(vertdata, 'texcoord')
-        uvwriter.setRow(numverts)
-        
-        for refinement in refinements:
-            for op_index in range(len(refinement)):
-                vals = refinement[op_index]
-                op = vals[0]
-                if op == PM_OP.TRIANGLE_ADDITION:
-                    indexrewriter.setRow(nextTriangleIndex)
-                    nextTriangleIndex += 3
-                    indexrewriter.addData1i(vals[1])
-                    indexrewriter.addData1i(vals[2])
-                    indexrewriter.addData1i(vals[3])
-                elif op == PM_OP.INDEX_UPDATE:
-                    indexrewriter.setRow(vals[1])
-                    indexrewriter.setData1i(vals[2])
-                elif op == PM_OP.VERTEX_ADDITION:
-                    numverts += 1
-                    vertwriter.addData3f(vals[1], vals[2], vals[3])
-                    normalwriter.addData3f(vals[4], vals[5], vals[6])
-                    uvwriter.addData2f(vals[7], vals[8])
+        update_nodepath(pnode, refinements)
     
         print '---JUST UPDATED ' + model.model_json['full_path'] + ' ----'
-        triggerScreenshot()
+        
+    elif action_type == ActionType.QUIT:
+        print 'Got a quite message, triggering quit flag'
+        base.quit = True
     
     return task.cont
 
 def main():
     
     parser = argparse.ArgumentParser(description='Tool for displaying a scene from open3dhub')
-    
+
+    parser.add_argument('--model-type', choices=['progressive', 'optimized'], default='progressive', required=False, help='Model type to use')
+    parser.add_argument('--model-subtype', choices=['base', 'full'], default='base', required=False, help='Model subtype (currently only for progressive)')
     parser.add_argument('--force-model-download', dest='force_model', action='store_true', help='Force re-downloading models')
-    parser.add_argument('--force-download', dest='force', action='store_true', help='Force re-downloading of model list')
-    parser.add_argument('type', help='Model type to use', choices=['optimized', 'progressive'])
-    parser.add_argument('num_models', help='Number of models to use', type=int)
-    parser.add_argument('--seed', required=False, help='Seed for random number generator', type=str)
+    parser.add_argument('scene_file', help='Scene file to use, generated with scene_generator', type=argparse.FileType('r'))
     parser.add_argument('--screenshots', required=False, help='Directory to save screenshots', type=str)
+    parser.add_argument('--exit-after-load', required=False, default=False, action='store_true', help='Exit the program after all models are loaded')
     
     args = parser.parse_args()
     
-    global FORCE_DOWNLOAD
     global FORCE_MODEL_DOWNLOAD
-    global MODEL_TYPE
-    global NUM_MODELS
-    global SEED
     global SAVE_SS
     global START_TIME
     global LAST_SCREENSHOT
+    global NUM_MODELS
+    global EXIT_AFTER
+    global MODEL_TYPE
+    global MODEL_SUBTYPE
+    global HASH_SIZES
     
-    FORCE_DOWNLOAD = args.force
+    EXIT_AFTER = args.exit_after_load
     FORCE_MODEL_DOWNLOAD = args.force_model
-    MODEL_TYPE = args.type
-    NUM_MODELS = args.num_models
-    SEED = args.seed
     SAVE_SS = args.screenshots
-    
-    if SEED is not None:
-        random.seed(SEED)
+    MODEL_TYPE = args.model_type
+    MODEL_SUBTYPE = args.model_subtype
         
     if SAVE_SS is not None:
+        if os.path.isdir(SAVE_SS):
+            yn = raw_input("Delete existing ss dir? ")
+            if yn == 'y':
+                shutil.rmtree(SAVE_SS)
+            else:
+                print 'Exiting then'
+                sys.exit(1)
+        if not os.path.isdir(SAVE_SS):
+            os.mkdir(SAVE_SS)
         if not os.path.isdir(SAVE_SS):
             print >> sys.stderr, 'Invalid screenshots directory'
             parser.print_usage()
             sys.exit(1)
     START_TIME = time.clock()
-    LAST_SCREENSHOT = time.clock()
+    LAST_SCREENSHOT = START_TIME
+    
+    scene_dict = pickle.load(args.scene_file)
+    HASH_SIZES = scene_dict['sizes']
+    scene_models = scene_dict['models']
+    NUM_MODELS = len(scene_models)
     
     global base, render, taskMgr, loader
     base = MyBase()
@@ -344,15 +320,17 @@ def main():
     render.setTransparency(TransparencyAttrib.MDual, 1)
     
     base.cam.setPos(0, 30000, 10000)
-    base.cam.lookAt(0, 0, 0.0)
+    base.cam.lookAt(0, 0, 2000)
     
-    t = LoadingThread()
+    t = LoadingThread(scene_models)
     t.daemon = True
     t.start()
     
     taskMgr.add(checkForLoad, "checkForLoad")
+    if SAVE_SS is not None:
+        taskMgr.add(triggerScreenshot, "triggerScreenshot")
     
-    KeyboardMovement()
+    KeyboardMovement(scale=10.0)
     MouseCamera()
     
     base.win.setClearColor(VBase4(0.9,0.9,0.9,1))
@@ -369,6 +347,9 @@ def main():
     environ.setAlphaScale(0.3)
     
     render.setAntialias(AntialiasAttrib.MAuto)
+    
+    # effectively disable distance culling
+    base.camLens.setFar(sys.maxint)
     
     base.run()
 
