@@ -8,8 +8,8 @@ def update_nodepath(pandaNode, refinements):
     prim = geom.modifyPrimitive(0)
     indexdata = prim.modifyVertices()
     
-    indexrewriter = GeomVertexRewriter(indexdata)
-    indexrewriter.setColumn(0)
+    indexwriter = GeomVertexWriter(indexdata)
+    indexwriter.setColumn(0)
     nextTriangleIndex = indexdata.getNumRows()
     
     vertwriter = GeomVertexWriter(vertdata, 'vertex')
@@ -25,14 +25,14 @@ def update_nodepath(pandaNode, refinements):
             vals = refinement[op_index]
             op = vals[0]
             if op == PM_OP.TRIANGLE_ADDITION:
-                indexrewriter.setRow(nextTriangleIndex)
+                indexwriter.setRow(nextTriangleIndex)
                 nextTriangleIndex += 3
-                indexrewriter.addData1i(vals[1])
-                indexrewriter.addData1i(vals[2])
-                indexrewriter.addData1i(vals[3])
+                indexwriter.addData1i(vals[1])
+                indexwriter.addData1i(vals[2])
+                indexwriter.addData1i(vals[3])
             elif op == PM_OP.INDEX_UPDATE:
-                indexrewriter.setRow(vals[1])
-                indexrewriter.setData1i(vals[2])
+                indexwriter.setRow(vals[1])
+                indexwriter.setData1i(vals[2])
             elif op == PM_OP.VERTEX_ADDITION:
                 numverts += 1
                 vertwriter.addData3f(vals[1], vals[2], vals[3])
