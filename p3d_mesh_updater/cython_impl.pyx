@@ -9,6 +9,13 @@ cdef enum PM_OP:
     TRIANGLE_ADDITION = 2
     VERTEX_ADDITION = 3
 
+cdef extern from "py_panda.h":
+    cdef struct Dtool_PyInstDef:
+        void* _ptr_to_object
+
+cdef void* get_ptr(object o):
+    return (<Dtool_PyInstDef*>o)._ptr_to_object
+
 cdef extern from "<string>" namespace "std":
     cdef cppclass string:
         string()
@@ -60,8 +67,7 @@ cdef extern from "nodePath.h":
 
 def update_nodepath(pandaNode, list refinements):
 
-    cdef long long dataPtr = pandaNode.this
-    cdef GeomNode* gnode = <GeomNode*>dataPtr
+    cdef GeomNode* gnode = <GeomNode*>get_ptr(pandaNode)
     cdef Geom* geom = gnode.modify_geom(0)
     cdef GeomVertexData* vertdata = geom.modify_vertex_data()
     cdef GeomPrimitive* prim = geom.modify_primitive(0)
