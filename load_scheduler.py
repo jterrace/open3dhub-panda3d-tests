@@ -15,6 +15,7 @@ class Model(object):
         self.solid_angle = 0.0
         self.model_type = model_type
         self.model_subtype = None
+        self.subfile_hashes = []
         self.bam_file = None
     
     def __str__(self):
@@ -127,8 +128,9 @@ class ProgressiveDownloadTask(DownloadTask):
         
         # priority is the solid angle
         priority = self.model.solid_angle
-        # multiplied by the percentage that this chunk is of the total size
-        priority = priority * min(float(open3dhub.PROGRESSIVE_CHUNK_SIZE) / self.model.HASH_SIZES[progressive_hash]['size'], 1.0)
+        # multiplied by a scale factor that makes earlier chunks have more weight
+        percentage = float(self.offset + self.length + open3dhub.PROGRESSIVE_CHUNK_SIZE) / self.model.HASH_SIZES[progressive_hash]['size']
+        priority = priority * ((1.0 - percentage) ** 2)
         # divided by the gzip size
         priority = priority / self.model.HASH_SIZES[progressive_hash]['gzip_size']
         

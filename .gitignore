@@ -7,3 +7,6 @@ p3d_mesh_updater/build*
 p3d_mesh_updater/cython_impl.c
 p3d_mesh_updater/cython_impl.cpp
 p3d_mesh_updater/cython_impl.so
+ss_*
+*.pickle
+*.scene

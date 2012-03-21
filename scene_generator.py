@@ -2,6 +2,9 @@ import argparse
 import math
 import random
 import pickle
+import posixpath
+import os
+
 import scene
 import open3dhub
 import load_scheduler
@@ -48,8 +51,19 @@ def get_random_models(num_models):
         rand_index = random.randrange(len(to_choose))
         chosen_index = to_choose.pop(rand_index)
         
+        model_json = progressive_models[chosen_index]
+        types = model_json['metadata']['types']
+        for type_name, type_data in types.iteritems():
+            type_data['subfile_hashes'] = []
+            for subfile in type_data['subfiles']:
+                splitpath = subfile.split('/')
+                basename = splitpath[-2]
+                subfile_path = posixpath.normpath(posixpath.join(model_json['base_path'], type_name, model_json['version_num'], basename))
+                subfile_hash = open3dhub.get_subfile_hash(subfile_path)
+                type_data['subfile_hashes'].append(subfile_hash)
+        
         x, y = next(xygen)
-        model = load_scheduler.Model(model_json = progressive_models[rand_index],
+        model = load_scheduler.Model(model_json = model_json,
                             model_type = 'progressive',
                             x = x,
                             y = y,
@@ -86,6 +100,7 @@ def main():
     json_items = [model.model_json for model in models]
     print 'Obtaining hash sizes'
     hash_sizes = open3dhub.get_hash_sizes(json_items)
+    print 'Got', len(hash_sizes), 'hash sizes'
     
     print 'Saving', len(models), 'scene members to file', args.scene_out
     pickle.dump({'models': models, 'sizes': hash_sizes}, args.scene_out)

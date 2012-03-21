@@ -42,8 +42,8 @@ TEMPDIR = os.path.join(CURDIR, '.temp_models')
 
 FORCE_MODEL_DOWNLOAD = None
 SAVE_SS = None
-NUM_DOWNLOAD_PROCS = multiprocessing.cpu_count() * 2
-NUM_LOAD_PROCS = multiprocessing.cpu_count()
+NUM_DOWNLOAD_PROCS = 4 #multiprocessing.cpu_count() * 2
+NUM_LOAD_PROCS = 2 #multiprocessing.cpu_count()
 START_TIME = 0
 LAST_SCREENSHOT = 0
 NUM_MODELS = None
@@ -51,6 +51,8 @@ EXIT_AFTER = False
 MODEL_SUBTYPE = None
 MODEL_TYPE = None
 HASH_SIZES = None
+
+PANDA3D = False
 
 class MyBase(ShowBase):
     def __init__(self):
@@ -101,19 +103,71 @@ class LoadingThread(threading.Thread):
             if model.model_type == 'progressive':
                 extra_part = '.' + MODEL_SUBTYPE
             model.bam_file = os.path.join(TEMPDIR, model.bam_file + '.' + model.model_type + '.' + model.model_type + extra_part + '.bam')
-            if os.path.isfile(model.bam_file):
+            if False and os.path.isfile(model.bam_file):
                 print 'Loading cached model', model.bam_file
                 load_queue.put((ActionType.LOAD_MODEL, model))
             else:
                 
-                panda3d_key = 'panda3d_%s_bam' % model.model_subtype if model.model_type == 'progressive' else 'panda3d_bam'
-                panda3d_hash =  model.model_json['metadata']['types'][model.model_type][panda3d_key]
-                panda3d_size = HASH_SIZES[panda3d_hash]['gzip_size']
-                
+                if PANDA3D:
+                    panda3d_key = 'panda3d_%s_bam' % model.model_subtype if model.model_type == 'progressive' else 'panda3d_bam'
+                    panda3d_hash =  model.model_json['metadata']['types'][model.model_type][panda3d_key]
+                    download_size = HASH_SIZES[panda3d_hash]['gzip_size']
+                else:
+                    model_hash =  model.model_json['metadata']['types'][model.model_type]['hash']
+                    subfile_hashes = model.model_json['metadata']['types'][model.model_type]['subfile_hashes']
+                    
+                    download_size = HASH_SIZES[model_hash]['gzip_size']
+                    
+                    if model.model_type == 'progressive':
+                        
+                        if model.model_subtype == 'base':
+                        
+                            for subfile in model.model_json['metadata']['types'][model.model_type]['subfiles']:
+                                splitpath = subfile.split('/')
+                                basename = './' + splitpath[-2]
+                                
+                                mipmaps = model.model_json['metadata']['types'][model.model_type]['mipmaps']
+                                mipmap_levels = mipmaps[basename]['byte_ranges']
+                                offset = 0
+                                length = 0
+                                for mipmap in mipmap_levels:
+                                    offset = mipmap['offset']
+                                    length = mipmap['length']
+                                    if mipmap['width'] >= 128 or mipmap['height'] >= 128:
+                                        break
+    
+                                download_size += length
+                        
+                        elif model.model_subtype == 'full':
+                            
+                            prog_hash = model.model_json['metadata']['types'][model.model_type].get('progressive_stream')
+                            if prog_hash is not None:
+                                download_size += HASH_SIZES[prog_hash]['gzip_size']
+                            
+                            for subfile in model.model_json['metadata']['types'][model.model_type]['subfiles']:
+                                splitpath = subfile.split('/')
+                                basename = './' + splitpath[-2]
+                                
+                                mipmaps = model.model_json['metadata']['types'][model.model_type]['mipmaps']
+                                mipmap_levels = mipmaps[basename]['byte_ranges']
+                                length = 0
+                                for mipmap in mipmap_levels:
+                                    length = mipmap['length']
+                                
+                                download_size += length
+                            
+                        else:
+                            raise Exception("unknown model subtype")
+                        
+                    else:
+                        for subfile_hash in subfile_hashes:
+                            download_size += HASH_SIZES[subfile_hash]['gzip_size']
+                    
+                    
                 # we want to normalize by file size
-                priority = model.solid_angle / float(panda3d_size)
+                priority = model.solid_angle / float(download_size)
                 # but then also boost by a lot so that progressive download tasks don't overtake
-                priority = priority * 100
+                priority = priority * 1 * 1000 * 1000 * 1000 * 1000
                 
                 dt = load_scheduler.ModelDownloadTask(model, priority=priority)
                 download_pool.add_task(dt)
@@ -153,10 +207,7 @@ class LoadingThread(threading.Thread):
             time.sleep(0.05)
             
         print 'Finished loading all models'
-        
-        if EXIT_AFTER:
-            print 'Exiting because all models are loaded.'
-            load_queue.put((ActionType.QUIT, ))
+        load_queue.put((ActionType.QUIT, ))
 
     def run(self):
         try:
@@ -173,8 +224,23 @@ def triggerScreenshot(task):
         base.win.saveScreenshot(os.path.join(SAVE_SS, ('%07.2f' % this_timestamp) + '.png'))
     return task.cont
 
+model_queued = False
+model_queue = []
+
+def checkQueue():
+    global model_queue
+    global model_queued
+    
+    if not model_queued and len(model_queue) > 0:
+        model_queued = True
+        model = model_queue.pop(0)
+        print 'LOADING MODEL', model.bam_file, modelLoaded
+        loader.loadModel(model.bam_file, callback=modelLoaded, extraArgs=[model])
+
 def modelLoaded(np, model):
-    print 'Model loaded', base.num_models_loaded
+    global model_queued
+    
+    print 'Model loaded', base.num_models_loaded, model.model_json['full_path']
     np.setPos(model.x, model.y, model.z)
     np.setScale(model.scale, model.scale, model.scale)
     minPt, maxPt = np.getTightBounds()
@@ -183,6 +249,7 @@ def modelLoaded(np, model):
     np.reparentTo(render)
     base.num_models_loaded += 1
     base.quit_frame = globalClock.getFrameCount()
+    model_queued = False
     #base.txtModelsLoaded.setText('Models Loaded: %d/%d' % (base.num_models_loaded, NUM_MODELS))
 
 class ActionType(object):
@@ -194,14 +261,20 @@ class ActionType(object):
 def checkForLoad(task):
     
     #print globalClock.getAverageFrameRate()
+    global model_queue
+    
+    checkQueue()
     
     try:
         action = load_queue.get_nowait()
     except Queue.Empty:
         action = None
     
-    if action is None and base.num_models_loaded >= NUM_MODELS and base.quit and base.screenshot_frame > base.quit_frame:
+    if EXIT_AFTER and action is None and base.num_models_loaded >= NUM_MODELS and base.quit and base.screenshot_frame > base.quit_frame:
         sys.exit(0)
+    elif action is None and base.num_models_loaded >= NUM_MODELS and base.quit and base.screenshot_frame > base.quit_frame:
+        base.render.analyze()
+        base.quit = False
     
     if action is None:
         return task.cont
@@ -210,7 +283,9 @@ def checkForLoad(task):
     
     if action_type == ActionType.LOAD_MODEL:
         model = action[1]
-        loader.loadModel(model.bam_file, callback=modelLoaded, extraArgs=[model])
+        print 'Queueing model for load:', model.model_json['full_path'], 'queue size', len(model_queue)
+        model_queue.append(model)
+        checkQueue()
     
     elif action_type == ActionType.UPDATE_TEXTURE:
         model = action[1]
@@ -237,12 +312,15 @@ def checkForLoad(task):
         np = np.find("**/primitive")
         pnode = np.node()
         
+        
+        start = time.time()
         update_nodepath(pnode, refinements)
+        end = time.time()
     
         print '---JUST UPDATED ' + model.model_json['full_path'] + ' ----'
         
     elif action_type == ActionType.QUIT:
-        print 'Got a quite message, triggering quit flag'
+        print 'Got a quit message, triggering quit flag'
         base.quit = True
     
     return task.cont
@@ -278,7 +356,8 @@ def main():
         
     if SAVE_SS is not None:
         if os.path.isdir(SAVE_SS):
-            yn = raw_input("Delete existing ss dir? ")
+            #yn = raw_input("Delete existing ss dir? ")
+            yn = 'y'
             if yn == 'y':
                 shutil.rmtree(SAVE_SS)
             else:
@@ -304,11 +383,11 @@ def main():
     taskMgr = base.taskMgr
     loader = base.loader
     
-    if FORCE_MODEL_DOWNLOAD:
-        try:
-            shutil.rmtree(TEMPDIR)
-        except OSError:
-            pass
+    #if FORCE_MODEL_DOWNLOAD:
+    #    try:
+    #        shutil.rmtree(TEMPDIR)
+    #    except OSError:
+    #        pass
     try:
         os.mkdir(TEMPDIR)
     except OSError:
@@ -351,6 +430,7 @@ def main():
     # effectively disable distance culling
     base.camLens.setFar(sys.maxint)
     
+    base.setFrameRateMeter(True)
     base.run()
 
 if __name__ == '__main__':

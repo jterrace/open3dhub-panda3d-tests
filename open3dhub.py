@@ -6,6 +6,7 @@ import tempfile
 import math
 import os
 import requests
+import pickle
 import time
 
 import numpy
@@ -23,12 +24,44 @@ BROWSE_URL = BASE_URL + '/api/browse'
 DOWNLOAD_URL = BASE_URL + '/download'
 DNS_URL = BASE_URL + '/dns'
 
-PROGRESSIVE_CHUNK_SIZE = 1024 * 1024 # 1 MB
+PANDA3D = False
+
+PROGRESSIVE_CHUNK_SIZE = 2 * 1024 * 1024 # 2 MB
 
 CURDIR = os.path.dirname(__file__)
 TEMPDIR = os.path.join(CURDIR, '.temp_models')
 
 REQUESTS_SESSION = requests.session()
+
+class PathInfo(object):
+    """Helper class for dealing with CDN paths"""
+    def __init__(self, filename):
+        self.filename = filename
+        self.normpath = posixpath.normpath(filename)
+        """Normalized original path"""
+        
+        split = self.normpath.split("/")
+        try:
+            self.version = str(int(split[-1]))
+            """Version number of the path"""
+        except ValueError:
+            self.version = None
+    
+        if self.version is None:
+            self.basename = split[-1]
+            """The filename of the path"""
+            self.basepath = self.normpath
+            """The base of the path, without the version number"""
+        else:
+            self.basename = split[-2]
+            self.basepath = '/'.join(split[:-1])
+            
+    def __str__(self):
+        return "<PathInfo filename='%s', normpath='%s', basepath='%s', basename='%s', version='%s'>" % \
+                (self.filename, self.normpath, self.basepath, self.basename, self.version)
+    
+    def __repr__(self):
+        return str(self)
 
 def urlfetch(url, httprange=None):
     """Fetches the given URL and returns data from it.
@@ -48,19 +81,52 @@ def hashfetch(dlhash, httprange=None):
     """Fetches the given hash and returns data from it."""
     return urlfetch(DOWNLOAD_URL + '/' + dlhash, httprange)
 
+def get_subfile_hash(subfile_path):
+    subfile_url = DNS_URL + subfile_path
+    subfile_json = json.loads(urlfetch(subfile_url))
+    subfile_hash = subfile_json['Hash']
+    return subfile_hash
+
 def get_list(limit=20):
     """Returns a list of dictionaries containing model JSON"""
     
     next_start = ''
     all_items = []
+    unique_models = set()
 
     while len(all_items) < limit and next_start != None:
+        print 'got', len(all_items), 'so far'
+        
         models_js = json.loads(urlfetch(BROWSE_URL + '/' + next_start))
         next_start = models_js['next_start']
         
         models_js = models_js['content_items']
-        all_items.extend(models_js)
-
+        
+        for model_js in models_js:
+            
+            progressive = model_js['metadata']['types'].get('progressive')
+            if progressive is not None and 'mipmaps' in progressive:
+                for mipmap_name, mipmap_data in progressive['mipmaps'].iteritems():
+                    old_byte_ranges = mipmap_data['byte_ranges']
+                    new_byte_ranges = []
+                    offset = 0
+                    for byte_data in old_byte_ranges:
+                        offset += 512
+                        new_byte_data = dict(byte_data)
+                        if offset != new_byte_data['offset']:
+                            new_byte_data['offset'] = offset
+                        file_len = new_byte_data['length']
+                        file_len = 512 * ((file_len + 512 - 1) / 512)
+                        offset += file_len
+                        new_byte_ranges.append(new_byte_data)
+                    model_js['metadata']['types']['progressive']['mipmaps'][mipmap_name]['byte_ranges'] = new_byte_ranges
+            
+            if model_js['full_path'] in unique_models:
+                print 'OMG< FOUND A DUPLICATE', model_js['full_path']
+            else:
+                unique_models.add(model_js['full_path'])
+                all_items.append(model_js)
+        
     if len(all_items) > limit:
         all_items = all_items[0:limit]
         
@@ -70,8 +136,9 @@ def get_hash_sizes(items):
 
     hash_keys = ['zip', 'screenshot', 'hash', 'thumbnail',
                  'progressive_stream', 'panda3d_base_bam',
-                 'panda3d_full_bam', 'panda3d_bam']
-    
+                 'panda3d_full_bam', 'panda3d_bam',
+                 'subfile_hashes']
+       
     unique_keys = set()
     for item in items:
         
@@ -80,18 +147,32 @@ def get_hash_sizes(items):
             for hash_key in hash_keys:
                 hash_key_val = type_data.get(hash_key)
                 if hash_key_val is not None:
-                    unique_keys.add(type_data[hash_key])
+                    if isinstance(hash_key_val, basestring):
+                        unique_keys.add(type_data[hash_key])
+                    else:
+                        unique_keys.update(type_data[hash_key])
                     
             #progressive mipmaps are nested
             if 'mipmaps' in type_data:
                 for mipmap_data in type_data['mipmaps'].itervalues():
                     unique_keys.add(mipmap_data['hash'])
+    
+    cache_file = os.path.join(CURDIR, 'hash-size-cache.pickle')
+    hash_cache = {}
+    if os.path.isfile(cache_file):
+        hash_cache = pickle.load(open(cache_file, 'rb'))
         
     hash_sizes = {}
     for hash in unique_keys:
-        resp = REQUESTS_SESSION.get(DOWNLOAD_URL + '/' + hash)
-        hash_sizes[hash] = {'size': len(resp.content),
-                            'gzip_size': int(resp.headers['content-length'])}
+        if hash in hash_cache:
+            hash_sizes[hash] = hash_cache[hash]
+        else:
+            resp = REQUESTS_SESSION.get(DOWNLOAD_URL + '/' + hash)
+            hash_sizes[hash] = {'size': len(resp.content),
+                                'gzip_size': int(resp.headers['content-length'])}
+            hash_cache[hash] = hash_sizes[hash]
+    
+    pickle.dump(hash_cache, open(cache_file, 'wb'))
     
     return hash_sizes
 
@@ -132,7 +213,7 @@ def download_mesh_and_subtasks(model):
     
     panda3d_key = 'panda3d_%s_bam' % model.model_subtype if model_type == 'progressive' else 'panda3d_bam'
     is_bam = False
-    if panda3d_key in type_dict:
+    if PANDA3D and panda3d_key in type_dict:
         bam_hash = type_dict[panda3d_key]
         print 'Downloading mesh (from bamfile)', model.model_json['base_path'], bam_hash
         data = hashfetch(bam_hash)
@@ -140,6 +221,9 @@ def download_mesh_and_subtasks(model):
     else:
         print 'Downloading mesh', model.model_json['base_path'], mesh_hash
         data = hashfetch(mesh_hash)
+    
+    subfile_basenames = [PathInfo(s).basepath for s in type_dict['subfiles']]
+    subfile_name_hash_map = dict(zip(subfile_basenames, type_dict['subfile_hashes']))
     
     subfile_dict = {}
     
@@ -150,8 +234,9 @@ def download_mesh_and_subtasks(model):
     if progressive_hash is not None and model.model_subtype != 'full':
         # priority is the solid angle
         priority = model.solid_angle
-        # multiplied by the percentage that this chunk is of the total size
-        priority = priority * min(float(PROGRESSIVE_CHUNK_SIZE) / model.HASH_SIZES[progressive_hash]['size'], 1.0)
+        # multiplied by a scale factor that makes earlier chunks have more weight
+        percentage = float(0 + PROGRESSIVE_CHUNK_SIZE) / model.HASH_SIZES[progressive_hash]['size']
+        priority = priority * ((1.0 - percentage) ** 2)
         # divided by the gzip size
         priority = priority / model.HASH_SIZES[progressive_hash]['gzip_size']
         
@@ -182,6 +267,7 @@ def download_mesh_and_subtasks(model):
                     break
 
             if not is_bam:
+                print 'GETTING TEXTURE', subfile, 'AT RANGE', offset, length
                 texture_data = hashfetch(tar_hash, httprange=(offset, length))
                 subfile_dict[basename] = texture_data
             
@@ -204,11 +290,28 @@ def download_mesh_and_subtasks(model):
                     tex_dt.dependents.append(texture_task_base)
                 texture_task_base = tex_dt
         
+        elif mipmaps is not None and basename in mipmaps and model.model_subtype == 'full':
+            mipmap_levels = mipmaps[basename]['byte_ranges']
+            tar_hash = mipmaps[basename]['hash']
+
+            model.prog_data = None
+            if progressive_hash is not None:
+                print 'DOWNLOADING PROGRESSIVE STREAM'
+                prog_data = hashfetch(progressive_hash)
+                model.prog_data = prog_data
+            
+            full_texture = list(reversed(mipmap_levels))[0]
+            
+            texture_basepath = PathInfo(subfile).basepath
+            print 'DOWNLOADING HIGHEST TEXTURE SIZE'
+            texture_data = hashfetch(tar_hash, httprange=(full_texture['offset'], full_texture['length']))
+            subfile_dict[basename] = texture_data
+        
         elif model.model_subtype != 'full':
-            texture_path = posixpath.normpath(posixpath.join(model.model_json['base_path'], model_type, model.model_json['version_num'], basename))
-            texture_url = DNS_URL + texture_path
-            texture_json = json.loads(urlfetch(texture_url))
-            texture_hash = texture_json['Hash']
+            #texture_path = posixpath.normpath(posixpath.join(model.model_json['base_path'], model_type, model.model_json['version_num'], basename))
+            #texture_hash = get_subfile_hash(texture_path)
+            texture_basepath = PathInfo(subfile).basepath
+            texture_hash = subfile_name_hash_map[texture_basepath]
             texture_data = hashfetch(texture_hash)
     
             subfile_dict[basename] = texture_data
@@ -265,24 +368,31 @@ def load_into_bamfile(meshdata, subfiles, model):
     """Uses pycollada and panda3d to load meshdata and subfiles and
     write out to a bam file on disk"""
 
-    assert False
+    if os.path.isfile(model.bam_file):
+        print 'returning cached bam file'
+        return model.bam_file
+
     mesh = load_mesh(meshdata, subfiles)
     model_name = model.model_json['full_path'].replace('/', '_')
     
-    if model.model_type == 'progressive_full':
+    if model.model_type == 'progressive' and model.model_subtype == 'full':
         progressive_stream = model.model_json['metadata']['types']['progressive'].get('progressive_stream')
         if progressive_stream is not None:
             print 'LOADING PROGRESSIVE STREAM'
-            data = hashfetch(progressive_stream)
+            data = model.prog_data
             try:
                 mesh = add_back_pm.add_back_pm(mesh, StringIO(data), 100)
+                print '-----'
+                print 'SUCCESSFULLY ADDED BACK PM'
+                print '-----'
             except:
                 f = open(model.bam_file, 'w')
                 f.close()
                 raise
 
-    print 'got mesh', mesh
+    print 'loading into bamfile', model_name, mesh
     scene_members = pandacore.getSceneMembers(mesh)
+    print 'got scene members', model_name, mesh
     
     rotateNode = GeomNode("rotater")
     rotatePath = NodePath(rotateNode)
@@ -294,7 +404,7 @@ def load_into_bamfile(meshdata, subfiles, model):
         r = collada.scene.RotateTransform(1,0,0,90)
         matrix = r.matrix
     rotatePath.setMat(Mat4(*matrix.T.flatten().tolist()))
-    
+
     for geom, renderstate, mat4 in scene_members:
         node = GeomNode("primitive")
         node.addGeom(geom)
@@ -302,14 +412,21 @@ def load_into_bamfile(meshdata, subfiles, model):
             node.setGeomState(0, renderstate)
         geomPath = rotatePath.attachNewNode(node)
         geomPath.setMat(mat4)
+        
+    print 'created np', model_name, mesh
 
-    if model.model_type != 'optimized_unflattened':
+    if model.model_type != 'optimized_unflattened' and model.model_type != 'progressive':
+        print 'ABOUT TO FLATTEN'
         rotatePath.flattenStrong()
+        print 'DONE FLATTENING'
+        
+    print 'flattened', model_name, mesh
     
     wrappedNode = pandacore.centerAndScale(rotatePath)
     wrappedNode.setName(model_name)
-    
+
     wrappedNode.writeBamFile(model.bam_file)
+    print 'saved', model_name, mesh
     wrappedNode = None
     
     return model.bam_file

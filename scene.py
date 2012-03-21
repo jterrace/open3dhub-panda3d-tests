@@ -59,7 +59,18 @@ def filter_too_complicated(models):
     
     for m in models:
         optimized = m['metadata']['types']['optimized']
-        if 'metadata' in optimized and optimized['metadata']['num_draw_calls'] < 50:
+        if 'metadata' in optimized and optimized['metadata']['num_draw_calls'] < 100:
+            filtered.append(m)
+    
+    return filtered
+
+def filter_cityengine(models):
+    """Filters out cityengine models that tahir uploaded"""
+    
+    filtered = []
+    
+    for m in models:
+        if 'tahirazim/apiupload' not in m['base_path']:
             filtered.append(m)
     
     return filtered
@@ -71,6 +82,9 @@ BAD_LIST = set(['/ayyyeung/models/tree.dae',
                 '/kittyvision/apartment1.dae',
                 '/zhihongmax/RX_0_Unicorn_Gundam.dae',
                 '/emily2e/models/roadblock.dae',
+                '/kchung25/models/model.dae',
+                '/bmistree/models/EarlyGalleon1.dae',
+                '/emily2e/models/familyfare.dae',
                 '/cedar/McLaren_F1_LM.dae'])
 def filter_bad_list(models):
     """Filters out models that are known to be bad"""
@@ -143,7 +157,11 @@ def get_progressive_models(force=False):
     all_cdn_models = open3dhub.get_list(100000)
     progressive_models = filter_non_progressive(all_cdn_models)
     progressive_models = filter_bad_list(progressive_models)
-    progressive_models = filter_non_panda3d(progressive_models)
+    #progressive_models = filter_non_panda3d(progressive_models)
+    progressive_models = filter_large_triangles(progressive_models)
+    progressive_models = filter_too_complicated(progressive_models)
+    progressive_models = filter_cityengine(progressive_models)
+    
     
     return progressive_models
 
