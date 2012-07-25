@@ -395,8 +395,6 @@ def main():
     
     base.disableMouse()
     pandacore.attachLights(render)
-    render.setShaderAuto()
-    render.setTransparency(TransparencyAttrib.MDual, 1)
     
     base.cam.setPos(0, 30000, 10000)
     base.cam.lookAt(0, 0, 2000)
@@ -412,23 +410,30 @@ def main():
     KeyboardMovement(scale=10.0)
     MouseCamera()
     
-    base.win.setClearColor(VBase4(0.9,0.9,0.9,1))
-    environ = loader.loadModel("models/environment")
+    #base.win.setClearColor(VBase4(0.9,0.9,0.9,1))
+    base.win.setClearColor(VBase4(0.529,0.807,0.98,1))
+    environ = loader.loadModel("grass.egg")
     environ.reparentTo(render)
     minPt, maxPt = environ.getTightBounds()
     xRange = math.fabs(minPt.getX() - maxPt.getX())
     yRange = math.fabs(minPt.getY() - maxPt.getY())
     zRange = math.fabs(minPt.getZ() - maxPt.getZ())
-    environ.setScale(30000 / xRange, 30000 / yRange, 1)
-    environ.setPos(0, 0, -1 * zRange / 2.0)
+    environ.setScale(500, 2500, 100)
+    environ.setPos(0, 1000, 0) #-1 * zRange / 2.0)
+    environ.setP(180)
+    #environ.lookAt(200, 200, 0)
+    #environ.lookAt(base.cam)
     
-    environ.setTransparency(TransparencyAttrib.MAlpha)
-    environ.setAlphaScale(0.3)
+    #environ.setTransparency(TransparencyAttrib.MAlpha)
+    #environ.setAlphaScale(0.3)
     
+    render.setShaderAuto()
     render.setAntialias(AntialiasAttrib.MAuto)
+    environ.setShaderOff()
     
     # effectively disable distance culling
     base.camLens.setFar(sys.maxint)
+    base.camLens.setNear(8.0)
     
     base.setFrameRateMeter(True)
     base.run()

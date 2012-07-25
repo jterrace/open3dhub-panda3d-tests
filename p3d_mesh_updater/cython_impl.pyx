@@ -36,10 +36,13 @@ cdef extern from "thread.h":
 cdef extern from "geomVertexWriter.h":
     cdef cppclass GeomVertexWriter:
         GeomVertexWriter(GeomVertexData *vertex_data, string name)
+        GeomVertexWriter(GeomVertexArrayData* arr_data)
+        bool set_column(int column)
         void set_row(int column)
         void add_data1i(int data)
         void add_data3f(float x, float y, float z)
         void add_data2f(float x, float y)
+        void set_data1i(int data)
 cdef extern from "geomVertexRewriter.h":
     cdef cppclass GeomVertexRewriter:
         GeomVertexRewriter(GeomVertexArrayData*)
@@ -73,8 +76,8 @@ def update_nodepath(pandaNode, list refinements):
     cdef GeomPrimitive* prim = geom.modify_primitive(0)
     cdef GeomVertexArrayData* indexdata = prim.modify_vertices(-1)
 
-    cdef GeomVertexRewriter* indexrewriter = new GeomVertexRewriter(indexdata)
-    indexrewriter.set_column(0)
+    cdef GeomVertexWriter* indexwriter = new GeomVertexWriter(indexdata)
+    indexwriter.set_column(0)
     cdef int nextTriangleIndex = indexdata.get_num_rows()
 
     cdef GeomVertexWriter* vertwriter = new GeomVertexWriter(vertdata, string(CONST_vertex))
@@ -93,14 +96,14 @@ def update_nodepath(pandaNode, list refinements):
             vals = refinement[op_index]
             op = vals[0]
             if op == TRIANGLE_ADDITION:
-                indexrewriter.set_row(nextTriangleIndex)
+                indexwriter.set_row(nextTriangleIndex)
                 nextTriangleIndex += 3
-                indexrewriter.add_data1i(vals[1])
-                indexrewriter.add_data1i(vals[2])
-                indexrewriter.add_data1i(vals[3])
+                indexwriter.add_data1i(vals[1])
+                indexwriter.add_data1i(vals[2])
+                indexwriter.add_data1i(vals[3])
             elif op == INDEX_UPDATE:
-                indexrewriter.set_row(vals[1])
-                indexrewriter.set_data1i(vals[2])
+                indexwriter.set_row(vals[1])
+                indexwriter.set_data1i(vals[2])
             elif op == VERTEX_ADDITION:
                 numverts += 1
                 vertwriter.add_data3f(vals[1], vals[2], vals[3])
@@ -110,5 +113,5 @@ def update_nodepath(pandaNode, list refinements):
     del uvwriter
     del normalwriter
     del vertwriter
-    del indexrewriter
+    del indexwriter
     
